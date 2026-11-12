@@ -178,6 +178,8 @@ function engine(
   const usage = { ...usageArg }
   mock.env(on, { HOME: '/home/u', ...env })
   const files = new Map<string, string>()
+  // The engine resolves a POSIX fixture path against the current drive on Windows.
+  const key = (p: string) => p.replace(/\\/g, '/').replace(/^[A-Za-z]:/, '')
   const registered: { name: string; description: string; isDeferred?: boolean }[] = []
   const statuses: (string | undefined)[] = []
   const messages = [{ role: 'user', text: '请继续做 Task 3', toolUses: [] }]
@@ -190,15 +192,15 @@ function engine(
     return { value: { tool: TOOL_FULL } }
   })
   on('fs.write', (_, e) => {
-    files.set(e.path, e.text)
+    files.set(key(e.path), e.text)
     return { value: undefined }
   })
   const fsFlags = { failRead: false }
   on('fs.read', (_, e) => {
     if (fsFlags.failRead) return { deny: 'EIO' }
-    return files.has(e.path) ? { value: files.get(e.path) as string } : { deny: 'ENOENT' }
+    return files.has(key(e.path)) ? { value: files.get(key(e.path)) as string } : { deny: 'ENOENT' }
   })
-  on('fs.exists', (_, e) => ({ value: files.has(e.path) }))
+  on('fs.exists', (_, e) => ({ value: files.has(key(e.path)) }))
   on('ui.status', (_, e) => {
     statuses.push(e.text)
     return { value: undefined }
@@ -307,6 +309,27 @@ testZh('tool: missing usage denies without throwing', async ($, on) => {
   await start($)
   const r = await call($, HANDOFF)
   expect(r.deny).toContain('不可用')
+})
+
+testZh('tool: last step total fills a missing engine reading', async ($, on) => {
+  const w = engine(on, { window: 1_000_000 })
+  await start($)
+  await modelStep($, w, 65_000)
+  await modelStep($, w, 200_000)
+  // A provider answering with zero usage leaves the engine without a context reading.
+  w.usage.tokens = undefined
+  const r = await call($, HANDOFF)
+  expect(r.deny).toBeUndefined()
+  expect(String(r.result)).toContain('已排队')
+})
+
+testZh('tool: last step total below the floor still denies', async ($, on) => {
+  const w = engine(on, { window: 1_000_000 })
+  await start($)
+  await modelStep($, w, 65_000)
+  w.usage.tokens = undefined
+  const r = await call($, HANDOFF)
+  expect(r.deny).toContain('6.5')
 })
 
 testZh('tool: missing fields denied', async ($, on) => {
