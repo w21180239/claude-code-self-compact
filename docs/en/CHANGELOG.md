@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.1 - 2026-11-13
+
+- Fixed: `compact_now` was denied with "Context usage is not available yet" for the whole session on providers that answer with zero usage. The engine then reports no context tokens, so the gate had nothing to read. It now falls back to the total of the last main-loop request's usage, which the plugin already reads on every step; the fallback is cleared at session boundaries and after a compaction. Seen with DeepSeek through an Anthropic-compatible endpoint.
+- Fixed: on a resumed session, where the first request carries more than 3 messages, the baseline stays unknown and `floorTokens` produced `NaN`, which silenced or misplaced the nudges. It now falls back to 65k there, as the gate already did.
+- Fixed: the tests' file mocks keyed raw engine paths, so every assertion on a written file or log line failed on Windows.
+
 ## 0.3.0 - 2026-11-13
 
 - Changed: the gate's second rule is now an absolute saving. `minSavingK` (default 40k) replaces `maxPostRatio`: `need = max(floorPct x window, baseline + 20k + minSavingK x 1k)`. With a 65k baseline the floor is 125k, or 12.5% of a 1M window and 62.5% of a 200k one; 0.2.0 demanded 77% there, which shut the tool on small windows.

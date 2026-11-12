@@ -66,6 +66,8 @@ The plugin refuses the call unless both conditions hold:
 
 Both reduce to one threshold: `need = max(floorPct x window, baseline + 20k + minSavingK x 1k)`.
 
+`tokens` comes from the engine's reading of the session's context (`$.session.usage()`). Some providers answer with zero usage, which leaves the engine unable to measure and reporting no tokens at all — DeepSeek through an Anthropic-compatible endpoint does this. The gate then falls back to the total of the last main-loop request's usage, which the plugin reads on every `turn.step` anyway; the two agree whenever the engine can measure. The fallback is cleared at session boundaries and after a successful compaction, so a stale pre-compaction size never passes the gate.
+
 With the defaults and a 65k baseline, `need = 125k`. On a 1M window that is 12.5%, so the 10% floor and the saving rule agree within 2.5 points. On a 200k window it is 62.5%, so small windows are no longer shut outright; in 0.2.0 the 55% post/pre ratio demanded 77% fill there.
 
 Why an absolute saving: a compaction leaves about 21k behind (median `postTokens` over 83 compactions in the author's history). Compacting frees `tokens - 21k`, and the freeing has to pay for the summary. Stating that in tokens keeps the rule the same on every window size, which the earlier window-share ratio did not.

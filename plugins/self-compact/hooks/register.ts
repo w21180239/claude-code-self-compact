@@ -313,9 +313,17 @@ export function pctOf(u: Usage): number | undefined {
   return Math.round((u.tokens / u.window) * 1000) / 10
 }
 
+/**
+ * The engine's context reading, with the last main-step total as the fallback: a provider that
+ * answers with zero usage leaves the engine unable to measure, so it reports no tokens.
+ */
+function contextOf(u: Usage): Usage {
+  return { tokens: u.tokens ?? state.lastStepTokens, window: u.window }
+}
+
 /** Smallest context worth compacting: the percent floor, or the size that still frees minSavingK tokens. */
-export function floorTokens(window: number, baseline: number, cfg: Config): number {
-  return Math.max((cfg.floorPct / 100) * window, baseline + POST_COMPACT_EXTRA + cfg.minSavingK * 1_000)
+export function floorTokens(window: number, baseline: number | undefined, cfg: Config): number {
+  return Math.max((cfg.floorPct / 100) * window, (baseline ?? DEFAULT_BASELINE) + POST_COMPACT_EXTRA + cfg.minSavingK * 1_000)
 }
 
 export type GateResult = { ok: true; pct: number } | { ok: false; reason: string; pct?: number }
@@ -325,7 +333,7 @@ export function gate(u: Usage, baseline: number | undefined, cfg: Config): GateR
   if (pct === undefined || u.tokens === undefined || !u.window) {
     return { ok: false, reason: STRINGS[cfg.language].gateNoUsage }
   }
-  const need = floorTokens(u.window, baseline ?? DEFAULT_BASELINE, cfg)
+  const need = floorTokens(u.window, baseline, cfg)
   if (u.tokens < need) {
     const needPct = Math.round((need / u.window) * 1000) / 10
     return {
@@ -618,6 +626,8 @@ type State = {
   interactive: boolean
   pending?: Pending
   baseline?: number
+  // Context tokens of the last main-loop request, for when the engine cannot measure.
+  lastStepTokens?: number
   seq: number
   lastTool?: string
   // Main-loop turn running; the executor only runs while idle.
@@ -759,8 +769,8 @@ async function handleCompact($: Dollar, input: Record<string, unknown>, isSub: b
   if (state.lastTool === 'AskUserQuestion') {
     return deny(S().denyAskedUser, 'asked-user', node)
   }
-  const usage = (await $.session.usage()).context
-  const g = gate({ tokens: usage.tokens, window: usage.window }, state.baseline, state.cfg)
+  const usage = contextOf((await $.session.usage()).context)
+  const g = gate(usage, state.baseline, state.cfg)
   if (!g.ok) return deny(g.reason, 'gate', node, g.pct)
 
   const root = await dataRoot($)
@@ -859,10 +869,10 @@ async function runCompact($: Dollar): Promise<void> {
   state.compacting = true
   try {
     const started = await $.clock.now()
-    const ctx = (await $.session.usage()).context
-    const before = pctOf({ tokens: ctx.tokens, window: ctx.window })
+    const ctx = contextOf((await $.session.usage()).context)
+    const before = pctOf(ctx)
     // Auto-compact got there first: the request is moot, but work still resumes.
-    if (ctx.tokens !== undefined && !gate({ tokens: ctx.tokens, window: ctx.window }, state.baseline, state.cfg).ok) {
+    if (ctx.tokens !== undefined && !gate(ctx, state.baseline, state.cfg).ok) {
       await dropPending($, p, { result: 'preempted', beforePct: p.requestedPct, afterPct: before })
       state.compacting = false
       sendContinuation($, p, p.requestedPct, before)
@@ -902,6 +912,8 @@ async function runCompact($: Dollar): Promise<void> {
     const durationMs = (await $.clock.now()) - started
     await dropPending($, p, { result: 'done', beforePct: before, afterPct: after, durationMs })
     state.lastNudgedPct = undefined
+    // The next step reports the post-compaction size; until then the old total is stale.
+    state.lastStepTokens = undefined
     state.checkedAt.clear()
     $.ui.toast(S().toastDone(String(before ?? '?'), String(after ?? '?')))
     sendContinuation($, p, before ?? p.requestedPct, after)
@@ -921,6 +933,7 @@ export const BASELINE_MAX_MESSAGES = 3
 
 async function onMainStep($: Dollar, u: StepUsage, messageCount: number): Promise<void> {
   const total = u.input_tokens + u.cache_read_input_tokens + u.cache_creation_input_tokens
+  state.lastStepTokens = total
   if (state.baseline === undefined && messageCount <= BASELINE_MAX_MESSAGES) state.baseline = total
   if (!state.interactive || !state.cfg.enabled || (await $.env.get('DISABLE_COMPACT')) === '1') return
   if (state.pending !== undefined || state.compacting) return
@@ -953,6 +966,7 @@ const hasNotes = (): boolean => state.notes.length > 0 || state.nudge !== undefi
 function resetConversation(): void {
   state.pending = undefined
   state.baseline = undefined
+  state.lastStepTokens = undefined
   state.seq = 0
   state.lastTool = undefined
   state.busy = false
@@ -992,10 +1006,10 @@ async function triggerGate($: Dollar): Promise<{ pct: number; floorPct: number }
   if (!state.cfg.autoNodes || !state.cfg.enabled || !state.interactive) return undefined
   if (state.pending !== undefined || state.compacting) return undefined
   if ((await $.env.get('DISABLE_COMPACT')) === '1') return undefined
-  const u = (await $.session.usage()).context
-  const g = gate({ tokens: u.tokens, window: u.window }, state.baseline, state.cfg)
+  const u = contextOf((await $.session.usage()).context)
+  const g = gate(u, state.baseline, state.cfg)
   if (!g.ok || !u.window) return undefined
-  const floorPct = (floorTokens(u.window, state.baseline ?? DEFAULT_BASELINE, state.cfg) / u.window) * 100
+  const floorPct = (floorTokens(u.window, state.baseline, state.cfg) / u.window) * 100
   return { pct: g.pct, floorPct }
 }
 
@@ -1054,7 +1068,7 @@ async function fireSelfCheck($: Dollar, key: string, text: string): Promise<void
   // The context may have shrunk (auto-compact) while the debounce ran.
   if ((await triggerGate($)) === undefined) return
   state.awaitingCheck = true
-  const pct = pctOf((await $.session.usage()).context)
+  const pct = pctOf(contextOf((await $.session.usage()).context))
   await logLine($, { result: 'self-check', kind: key === 'pct' ? undefined : key, pct })
   // Not awaited: submit resolves only once the next turn starts.
   void Promise.resolve($.prompt.submit({ text })).catch(() => {})
