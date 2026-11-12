@@ -1,0 +1,14 @@
+{
+  "name": "claude-code-self-compact",
+  "owner": {
+    "name": "w21180239"
+  },
+  "description": "Claude Code plugin that lets Claude compact its own context at task milestones.",
+  "plugins": [
+    {
+      "name": "self-compact",
+      "source": "./plugins/self-compact",
+      "description": "Lets Claude compact its own context at task milestones: agent-initiated /compact with self-written instructions, gated by context size, then auto-continue."
+    }
+  ]
+}

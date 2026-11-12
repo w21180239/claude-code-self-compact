@@ -1,0 +1,54 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 640" width="1280" height="640">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0B1020"/>
+      <stop offset="1" stop-color="#0E2A33"/>
+    </linearGradient>
+  </defs>
+  <rect width="1280" height="640" fill="url(#bg)"/>
+  <g transform="translate(64 56) scale(0.75)">
+    <rect x="8" y="8" width="112" height="112" rx="24" fill="#0F766E"/>
+    <g fill="#FFFFFF">
+      <rect x="28" y="24" width="72" height="10" rx="5"/>
+      <rect x="28" y="94" width="72" height="10" rx="5"/>
+    </g>
+    <g fill="none" stroke="#FFFFFF" stroke-width="6" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M50 42l14 9 14-9"/>
+      <path d="M50 86l14-9 14 9"/>
+    </g>
+    <rect x="42" y="56" width="44" height="16" rx="5" fill="#FBBF24"/>
+  </g>
+  <g font-family="Segoe UI, Helvetica, Arial, sans-serif">
+    <text x="176" y="124" font-size="76" font-weight="700" fill="#FFFFFF">self-compact</text>
+    <text x="68" y="216" font-size="36" fill="#D5F5EF">Let Claude compact its own context at task milestones.</text>
+    <text x="68" y="266" font-size="28" fill="#9FB8BF">Agent-initiated /compact with self-written instructions,</text>
+    <text x="68" y="304" font-size="28" fill="#9FB8BF">then auto-continue. No API key, no network calls.</text>
+
+    <text x="68" y="420" font-size="16" font-weight="700" letter-spacing="2" fill="#FBBF24">CONTEXT FILL, 0-50% OF A 1M WINDOW</text>
+    <!-- bar spans x=68..1212 for 0..50% -->
+    <rect x="68" y="446" width="1144" height="28" rx="14" fill="#10142B" stroke="#2A2F5A"/>
+    <rect x="68" y="446" width="343" height="28" rx="14" fill="#134E4A"/>
+    <rect x="411" y="446" width="114" height="28" fill="#115E59"/>
+    <rect x="525" y="446" width="229" height="28" fill="#0F9488"/>
+    <rect x="754" y="446" width="229" height="28" fill="#B45309"/>
+    <path d="M983 446H1198a14 14 0 0 1 0 28H983z" fill="#B91C1C"/>
+    <!-- ticks -->
+    <g stroke="#FFFFFF" stroke-width="2">
+      <path d="M411 436V484"/>
+      <path d="M525 436V484"/>
+      <path d="M754 436V484"/>
+      <path d="M983 436V484"/>
+    </g>
+    <g font-size="20" fill="#E3E5F5" text-anchor="middle">
+      <text x="411" y="518" font-weight="700">15%</text>
+      <text x="411" y="544" font-size="16" fill="#9FB8BF">floor</text>
+      <text x="525" y="518" font-weight="700">20%</text>
+      <text x="525" y="544" font-size="16" fill="#9FB8BF">any clean node</text>
+      <text x="754" y="518" font-weight="700">30%</text>
+      <text x="754" y="544" font-size="16" fill="#9FB8BF">nudges start</text>
+      <text x="983" y="518" font-weight="700">40%</text>
+      <text x="983" y="544" font-size="16" fill="#9FB8BF">compact at next safe step</text>
+    </g>
+    <text x="68" y="600" font-size="18" fill="#9FB8BF">github.com/w21180239/claude-code-self-compact</text>
+  </g>
+</svg>

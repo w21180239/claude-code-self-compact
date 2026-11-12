@@ -1,0 +1,85 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 380" width="1200" height="380" role="img" aria-label="self-compact flow: queue, turn end, compact, continue">
+  <title>self-compact flow</title>
+  <defs>
+    <marker id="arr" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0 0L10 5L0 10z" fill="#5EEAD4"/>
+    </marker>
+    <marker id="arr-r" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0L10 5L0 10z" fill="#F87171"/>
+    </marker>
+  </defs>
+  <rect width="1200" height="380" rx="16" fill="#0B1020"/>
+  <g font-family="Segoe UI, Helvetica, Arial, sans-serif">
+    <!-- step boxes -->
+    <g>
+      <rect x="32" y="40" width="248" height="196" rx="14" fill="#10142B" stroke="#2A2F5A"/>
+      <text x="52" y="72" font-size="14" font-weight="700" letter-spacing="2" fill="#FBBF24">1  QUEUE</text>
+      <text x="52" y="104" font-size="18" font-weight="700" fill="#FFFFFF">Claude calls</text>
+      <text x="52" y="128" font-size="16" font-family="Menlo, Consolas, monospace" fill="#5EEAD4">compact_now(handoff)</text>
+      <text fill="#C7CBE8" font-size="15">
+        <tspan x="52" y="164">Gate checks size and floor</tspan>
+        <tspan x="52" y="188">Writes handoff-N.md</tspan>
+        <tspan x="52" y="212">Returns "scheduled"</tspan>
+      </text>
+    </g>
+    <g>
+      <rect x="326" y="40" width="248" height="196" rx="14" fill="#10142B" stroke="#2A2F5A"/>
+      <text x="346" y="72" font-size="14" font-weight="700" letter-spacing="2" fill="#FBBF24">2  TURN END</text>
+      <text x="346" y="104" font-size="18" font-weight="700" fill="#FFFFFF">Claude finishes</text>
+      <text x="346" y="128" font-size="18" font-weight="700" fill="#FFFFFF">the turn</text>
+      <text fill="#C7CBE8" font-size="15">
+        <tspan x="346" y="164">Not aborted</tspan>
+        <tspan x="346" y="188">1.5 s debounce</tspan>
+        <tspan x="346" y="212">Re-read context usage</tspan>
+      </text>
+    </g>
+    <g>
+      <rect x="620" y="40" width="248" height="196" rx="14" fill="#10142B" stroke="#2A2F5A"/>
+      <text x="640" y="72" font-size="14" font-weight="700" letter-spacing="2" fill="#FBBF24">3  COMPACT</text>
+      <text x="640" y="104" font-size="18" font-weight="700" fill="#FFFFFF">Native compaction</text>
+      <text x="640" y="128" font-size="16" font-family="Menlo, Consolas, monospace" fill="#5EEAD4">{ instructions }</text>
+      <text fill="#C7CBE8" font-size="15">
+        <tspan x="640" y="164">Handoff is the summarizer brief</tspan>
+        <tspan x="640" y="188">Skip or error: retry every 2 s,</tspan>
+        <tspan x="640" y="212">5 times, then next turn end</tspan>
+      </text>
+    </g>
+    <g>
+      <rect x="914" y="40" width="254" height="196" rx="14" fill="#10142B" stroke="#2A2F5A"/>
+      <text x="934" y="72" font-size="14" font-weight="700" letter-spacing="2" fill="#FBBF24">4  CONTINUE</text>
+      <text x="934" y="104" font-size="18" font-weight="700" fill="#FFFFFF">Work resumes</text>
+      <text x="934" y="128" font-size="18" font-weight="700" fill="#FFFFFF">by itself</text>
+      <text fill="#C7CBE8" font-size="15">
+        <tspan x="934" y="164">Toast: before % to after %</tspan>
+        <tspan x="934" y="188">Line added to log.jsonl</tspan>
+        <tspan x="934" y="212">Continuation prompt with next</tspan>
+      </text>
+    </g>
+    <!-- main arrows -->
+    <g stroke="#5EEAD4" stroke-width="3" fill="none">
+      <path d="M284 138H318" marker-end="url(#arr)"/>
+      <path d="M578 138H612" marker-end="url(#arr)"/>
+      <path d="M872 138H906" marker-end="url(#arr)"/>
+    </g>
+    <!-- exits -->
+    <text x="176" y="270" font-size="14" font-weight="700" letter-spacing="2" fill="#F87171">EXITS WITHOUT COMPACTING</text>
+    <g stroke="#F87171" stroke-width="2" fill="none">
+      <path d="M156 236V292" marker-end="url(#arr-r)"/>
+      <path d="M450 236V292" marker-end="url(#arr-r)"/>
+      <path d="M744 236V292" marker-end="url(#arr-r)"/>
+    </g>
+    <g font-size="15" fill="#E3E5F5">
+      <rect x="32" y="296" width="248" height="56" rx="10" fill="#1A1020" stroke="#4A2A3A"/>
+      <text x="48" y="320">Denied: below the floor,</text>
+      <text x="48" y="340">subagent, headless, disabled</text>
+      <rect x="326" y="296" width="248" height="56" rx="10" fill="#1A1020" stroke="#4A2A3A"/>
+      <text x="342" y="320">Dropped: Esc, auto-compact</text>
+      <text x="342" y="340">ran first, handoff gone stale</text>
+      <rect x="620" y="296" width="248" height="56" rx="10" fill="#1A1020" stroke="#4A2A3A"/>
+      <text x="636" y="320">Gave up: toast, and Claude is</text>
+      <text x="636" y="340">told to call again later</text>
+    </g>
+    <text x="914" y="326" font-size="15" fill="#9AA0C8">Your next prompt always wins:</text>
+    <text x="914" y="346" font-size="15" fill="#9AA0C8">the handoff "next" is dropped.</text>
+  </g>
+</svg>

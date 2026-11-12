@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Questions and ideas
+    url: https://github.com/w21180239/claude-code-self-compact/discussions
+    about: Usage questions, tuning the floor and tiers, and general discussion
+  - name: Security vulnerability
+    url: https://github.com/w21180239/claude-code-self-compact/security/advisories/new
+    about: Report privately, not in a public issue

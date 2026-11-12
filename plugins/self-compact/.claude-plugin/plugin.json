@@ -1,0 +1,46 @@
+{
+  "name": "self-compact",
+  "version": "0.1.0",
+  "description": "Lets Claude compact its own context at task milestones: agent-initiated /compact with self-written instructions, gated by context size, then auto-continue.",
+  "author": { "name": "w21180239" },
+  "license": "MIT",
+  "keywords": ["self-compact", "compaction", "auto-compact", "context-window", "claude-code", "mod"],
+  "userConfig": {
+    "floorPct": {
+      "type": "number",
+      "title": "压缩下限 (%)",
+      "description": "上下文占窗口低于此百分比时拒绝 compact_now",
+      "default": 15
+    },
+    "maxPostRatio": {
+      "type": "number",
+      "title": "压后/压前比例上限",
+      "description": "预计压后大小占当前大小的上限，超过则拒绝",
+      "default": 0.55
+    },
+    "nudgeStartPct": {
+      "type": "number",
+      "title": "开始提醒 (%)",
+      "description": "上下文占比达到此值后开始提醒模型留意节点",
+      "default": 30
+    },
+    "nudgeStepPct": {
+      "type": "number",
+      "title": "提醒间隔 (%)",
+      "description": "每上涨此百分点再提醒一次",
+      "default": 5
+    },
+    "urgentPct": {
+      "type": "number",
+      "title": "升级提醒 (%)",
+      "description": "达到此值后提醒措辞升级为尽快压缩",
+      "default": 40
+    },
+    "enabled": {
+      "type": "boolean",
+      "title": "启用",
+      "description": "关闭后 compact_now 全部拒绝，且不再提醒",
+      "default": true
+    }
+  }
+}

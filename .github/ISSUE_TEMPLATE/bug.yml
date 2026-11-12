@@ -1,0 +1,40 @@
+name: Bug report
+description: compact_now denied when it should not be, a compaction that did not run, a lost handoff item, or a bad nudge
+labels: [bug]
+body:
+  - type: input
+    id: version
+    attributes:
+      label: Claude Code version
+      description: Output of `claude --version`
+      placeholder: 2.1.322 (Claude Code)
+    validations:
+      required: true
+  - type: input
+    id: window
+    attributes:
+      label: Context window size
+      description: For example 200k or 1M, and the model
+      placeholder: 1M, claude-opus
+    validations:
+      required: true
+  - type: textarea
+    id: happened
+    attributes:
+      label: What happened
+      description: What you expected, what you saw, and the context percentage at the time. Do not paste private content.
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: log.jsonl excerpt
+      description: The relevant lines from `~/.claude/self-compact/log.jsonl`. Remove anything you do not want to share (the `node` field is free text).
+      render: json
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: OS and install method
+      placeholder: macOS 15, marketplace add

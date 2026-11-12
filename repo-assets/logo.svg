@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128" role="img" aria-label="self-compact logo">
+  <title>self-compact</title>
+  <rect x="8" y="8" width="112" height="112" rx="24" fill="#0F766E"/>
+  <g fill="#FFFFFF">
+    <rect x="28" y="24" width="72" height="10" rx="5"/>
+    <rect x="28" y="94" width="72" height="10" rx="5"/>
+  </g>
+  <g fill="none" stroke="#FFFFFF" stroke-width="6" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M50 42l14 9 14-9"/>
+    <path d="M50 86l14-9 14 9"/>
+  </g>
+  <rect x="42" y="56" width="44" height="16" rx="5" fill="#FBBF24"/>
+</svg>
