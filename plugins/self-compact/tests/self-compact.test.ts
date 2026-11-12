@@ -15,46 +15,54 @@ import {
 } from '../hooks/register'
 import type { Handoff } from '../hooks/register'
 
-test('gate: below 15% of 1M denies', () => {
-  const g = gate({ tokens: 140_000, window: 1_000_000 }, 65_000, DEFAULTS)
+test('gate: below the min-saving floor denies', () => {
+  // With a 65k baseline the floor is 65k + 20k + 40k = 125k.
+  const g = gate({ tokens: 120_000, window: 1_000_000 }, 65_000, DEFAULTS)
   expect(g.ok).toBe(false)
   if (!g.ok) {
-    expect(g.reason).toContain('14')
-    expect(g.reason).toContain('15')
+    expect(g.reason).toContain('12')
+    expect(g.reason).toContain('12.5')
   }
 })
 
-test('gate: post ratio binds', () => {
-  expect(gate({ tokens: 150_000, window: 1_000_000 }, 65_000, DEFAULTS).ok).toBe(false)
-  expect(gate({ tokens: 160_000, window: 1_000_000 }, 65_000, DEFAULTS)).toEqual({ ok: true, pct: 16 })
+test('gate: minSavingK binds above the percent floor', () => {
+  expect(gate({ tokens: 120_000, window: 1_000_000 }, 65_000, DEFAULTS).ok).toBe(false)
+  expect(gate({ tokens: 130_000, window: 1_000_000 }, 65_000, DEFAULTS)).toEqual({ ok: true, pct: 13 })
 })
 
 test('gate: missing baseline uses 65k', () => {
-  expect(gate({ tokens: 150_000, window: 1_000_000 }, undefined, DEFAULTS).ok).toBe(false)
-  expect(gate({ tokens: 160_000, window: 1_000_000 }, undefined, DEFAULTS)).toEqual({ ok: true, pct: 16 })
+  expect(gate({ tokens: 120_000, window: 1_000_000 }, undefined, DEFAULTS).ok).toBe(false)
+  expect(gate({ tokens: 130_000, window: 1_000_000 }, undefined, DEFAULTS)).toEqual({ ok: true, pct: 13 })
 })
 
 test('gate: missing usage denies', () => {
   const g = gate({}, 65_000, DEFAULTS)
   expect(g.ok).toBe(false)
-  expect(gate({ tokens: 160_000 }, 65_000, DEFAULTS).ok).toBe(false)
+  expect(gate({ tokens: 130_000 }, 65_000, DEFAULTS).ok).toBe(false)
 })
 
-test('gate: 200k window effectively closed', () => {
-  expect(gate({ tokens: 150_000, window: 200_000 }, 65_000, DEFAULTS).ok).toBe(false)
+test('gate: a 200k window opens at baseline + 60k', () => {
+  expect(gate({ tokens: 120_000, window: 200_000 }, 65_000, DEFAULTS).ok).toBe(false)
+  expect(gate({ tokens: 130_000, window: 200_000 }, 65_000, DEFAULTS)).toEqual({ ok: true, pct: 65 })
 })
 
-test('nudgeLevel: 29 none, 30 soft, 32 after 30 none, 35 after 30 soft, 41 urgent', () => {
-  expect(nudgeLevel(29, undefined, 15, DEFAULTS)).toBe('none')
-  expect(nudgeLevel(30, undefined, 15, DEFAULTS)).toBe('soft')
-  expect(nudgeLevel(32, 30, 15, DEFAULTS)).toBe('none')
-  expect(nudgeLevel(35, 30, 15, DEFAULTS)).toBe('soft')
-  expect(nudgeLevel(41, undefined, 15, DEFAULTS)).toBe('urgent')
+test('gate: floorPct still binds on a 1M window', () => {
+  // A 20k baseline leaves 80k, below 10% of 1M.
+  expect(gate({ tokens: 90_000, window: 1_000_000 }, 20_000, DEFAULTS).ok).toBe(false)
+  expect(gate({ tokens: 100_000, window: 1_000_000 }, 20_000, DEFAULTS).ok).toBe(true)
+})
+
+test('nudgeLevel: 19 none, 20 soft, 22 after 20 none, 25 after 20 soft, 36 urgent', () => {
+  expect(nudgeLevel(19, undefined, 10, DEFAULTS)).toBe('none')
+  expect(nudgeLevel(20, undefined, 10, DEFAULTS)).toBe('soft')
+  expect(nudgeLevel(22, 20, 10, DEFAULTS)).toBe('none')
+  expect(nudgeLevel(25, 20, 10, DEFAULTS)).toBe('soft')
+  expect(nudgeLevel(36, undefined, 10, DEFAULTS)).toBe('urgent')
 })
 
 test('nudgeLevel: start raised to floor', () => {
-  expect(nudgeLevel(31, undefined, 35, DEFAULTS)).toBe('none')
-  expect(nudgeLevel(35, undefined, 35, DEFAULTS)).toBe('soft')
+  expect(nudgeLevel(29, undefined, 30, DEFAULTS)).toBe('none')
+  expect(nudgeLevel(30, undefined, 30, DEFAULTS)).toBe('soft')
 })
 
 const HANDOFF: Handoff = {
@@ -284,11 +292,11 @@ testZh('tool: non-interactive denied', async ($, on) => {
 })
 
 testZh('tool: below floor denied with pct', async ($, on) => {
-  const w = engine(on, { tokens: 140_000, window: 1_000_000 })
+  const w = engine(on, { tokens: 120_000, window: 1_000_000 })
   await start($)
   const r = await call($, HANDOFF)
-  expect(r.deny).toContain('14%')
-  expect(r.deny).toContain('15')
+  expect(r.deny).toContain('12%')
+  expect(r.deny).toContain('12.5')
   expect(w.handoffs()).toEqual([])
   expect(w.statuses).toEqual([])
   expect(w.log().at(-1)?.result).toBe('denied:gate')
@@ -571,15 +579,15 @@ const ctxOf = async ($: Dollar) => ((await bash($)).context ?? []).join(' ')
 
 const stop = ($: Dollar) => $.classic.Stop({ stop_hook_active: false } as never)
 
-testZh('nudge: none below 30%', async ($, on) => {
+testZh('nudge: none below 20%', async ($, on) => {
   const w = engine(on)
   await start($)
   await modelStep($, w, 65_000)
-  await modelStep($, w, 290_000)
+  await modelStep($, w, 190_000)
   expect(await ctxOf($)).toBe('')
 })
 
-testZh('nudge: soft at 30 then every 5', async ($, on) => {
+testZh('nudge: soft at 20 then every 5', async ($, on) => {
   const w = engine(on)
   await start($)
   await modelStep($, w, 65_000)
@@ -595,7 +603,7 @@ testZh('nudge: soft at 30 then every 5', async ($, on) => {
   expect(await ctxOf($)).toBe('') // delivered once
 })
 
-testZh('nudge: urgent at 40', async ($, on) => {
+testZh('nudge: urgent at 35', async ($, on) => {
   const w = engine(on)
   await start($)
   await modelStep($, w, 65_000)
@@ -677,12 +685,12 @@ testZh('nudge: counts afresh after a compaction', async ($, on) => {
 })
 
 testZh('baseline: first main step sets the floor', async ($, on) => {
-  // A 120k baseline needs (120k + 20k) / 0.55 = 255k before compact_now is accepted.
-  const w = engine(on, { tokens: 240_000, window: 1_000_000 })
+  // A 120k baseline needs 120k + 20k + 40k = 180k before compact_now is accepted.
+  const w = engine(on, { tokens: 170_000, window: 1_000_000 })
   await start($)
   await modelStep($, w, 120_000)
-  expect((await call($, HANDOFF)).deny).toContain('24%')
-  w.usage.tokens = 260_000
+  expect((await call($, HANDOFF)).deny).toContain('17%')
+  w.usage.tokens = 190_000
   expect((await call($, HANDOFF)).deny).toBeUndefined()
 })
 
@@ -751,8 +759,8 @@ testZh('session.end (/clear): nudge counters, notes and baseline start afresh', 
   await sessionEnd($)
   // Same 30% again in the new session nudges again, and a 120k first step is the new baseline.
   await modelStep($, w, 120_000)
-  w.usage.tokens = 240_000
-  expect((await call($, HANDOFF)).deny).toContain('24%')
+  w.usage.tokens = 170_000
+  expect((await call($, HANDOFF)).deny).toContain('17%')
   await modelStep($, w, 300_000)
   expect(await ctxOf($)).toContain('30%')
 })
@@ -868,15 +876,15 @@ testZh('tool description (zh): short, with tiers, nodes, anti-nodes and the end-
   await start($)
   const d = w.registered[0].description
   expect(d.length <= 640).toBe(true)
-  for (const s of ['15%', '20%', '30%', '40%', '好节点', '反节点', '标出节点', '不要再调用']) expect(d).toContain(s)
+  for (const s of ['10%', '15%', '20%', '35%', '好节点', '反节点', '标出节点', '不要再调用']) expect(d).toContain(s)
 })
 
 test('configFrom: defaults, strings and booleans', () => {
   expect(configFrom(undefined)).toEqual(DEFAULTS)
-  const c = configFrom({ floorPct: '20', maxPostRatio: 0.4, nudgeStartPct: '', enabled: 'false' })
+  const c = configFrom({ floorPct: '20', minSavingK: 25, nudgeStartPct: '', enabled: 'false' })
   expect(c.floorPct).toBe(20)
-  expect(c.maxPostRatio).toBe(0.4)
-  expect(c.nudgeStartPct).toBe(30)
+  expect(c.minSavingK).toBe(25)
+  expect(c.nudgeStartPct).toBe(20)
   expect(c.enabled).toBe(false)
   expect(configFrom({ enabled: false }).enabled).toBe(false)
   expect(configFrom({ enabled: true }).enabled).toBe(true)
@@ -894,10 +902,10 @@ test('configFrom: language accepts zh, anything else is en', () => {
 })
 
 test('i18n: default language is English for deny, toast and continuation', async ($, on) => {
-  const w = engine(on, { tokens: 140_000, window: 1_000_000 })
+  const w = engine(on, { tokens: 120_000, window: 1_000_000 })
   await start($)
   const denied = await call($, HANDOFF)
-  expect(denied.deny).toContain('14%')
+  expect(denied.deny).toContain('12%')
   expect(NON_ASCII.test(denied.deny ?? '')).toBe(false)
   expect((await call($, HANDOFF, { agentId: 's' })).deny).toContain('main session')
   w.usage.tokens = 200_000
@@ -918,7 +926,7 @@ test('i18n: default language is English for deny, toast and continuation', async
 })
 
 test('i18n: zh config keeps Chinese strings', { options: { language: 'zh' } }, async ($, on) => {
-  const w = engine(on, { tokens: 140_000, window: 1_000_000 })
+  const w = engine(on, { tokens: 120_000, window: 1_000_000 })
   await start($)
   expect((await call($, HANDOFF)).deny).toContain('低于压缩门槛')
   w.usage.tokens = 200_000
@@ -932,7 +940,7 @@ test('i18n: zh config keeps Chinese strings', { options: { language: 'zh' } }, a
 })
 
 test('i18n: unknown language falls back to English', { options: { language: 'fr' } }, async ($, on) => {
-  const w = engine(on, { tokens: 140_000, window: 1_000_000 })
+  const w = engine(on, { tokens: 120_000, window: 1_000_000 })
   await start($)
   const r = await call($, HANDOFF)
   expect(r.deny).toContain('below the compaction threshold')
@@ -944,7 +952,7 @@ test('tool description (en): short with tiers, nodes, anti-nodes and end-the-tur
   await start($)
   const d = w.registered[0].description
   expect(d.length <= 700).toBe(true)
-  for (const s of ['15%', '20%', '30%', '40%', 'Good nodes', 'Anti-nodes', 'flags nodes', 'end the turn now', 'call no more tools']) {
+  for (const s of ['10%', '15%', '20%', '35%', 'Good nodes', 'Anti-nodes', 'flags nodes', 'end the turn now', 'call no more tools']) {
     expect(d).toContain(s)
   }
   expect(d.replace(/[→·]/g, '')).not.toMatch(NON_ASCII)
@@ -995,7 +1003,12 @@ test('detectNode: strong and weak signals', () => {
   strong('Bash', { command: 'cd x && git push -u origin feat' }, 'push')
   strong('Bash', { command: 'gh pr create --fill' }, 'pr')
   strong('Bash', { command: 'gh pr merge 12' }, 'pr')
+  strong('Bash', { command: 'gh pr review 12 --comment' }, 'pr')
+  strong('Bash', { command: 'gh issue comment 3 --body ok' }, 'pr')
   strong('Bash', { command: 'git tag v1.0.0' }, 'tag')
+  strong('Bash', { command: 'git merge feat' }, 'merge')
+  strong('Bash', { command: 'gog gmail send --to a@b --subject x' }, 'sent')
+  strong('Bash', { command: 'agent-slack message send --channel general' }, 'sent')
   strong('Write', { file_path: '/g/docs/specs/2026-11-12-x-design.md' }, 'spec-plan')
   strong('Edit', { file_path: '/g/docs/superpowers/plans/p.md' }, 'spec-plan')
   strong('MultiEdit', { file_path: 'docs/spec/x.md' }, 'spec-plan')
@@ -1003,21 +1016,28 @@ test('detectNode: strong and weak signals', () => {
   strong('Write', { file_path: '/g/notes/handoff-2.md' }, 'handoff')
   strong('TodoWrite', { todos: [{ content: 'a', status: 'completed' }, { content: 'b', status: 'completed' }] }, 'todos-done')
   weak('Bash', { command: 'git commit -m "x"' }, 'commit')
+  weak('Bash', { command: 'npm test' }, 'tests')
+  weak('Bash', { command: 'cd g && go test ./...' }, 'tests')
+  weak('Bash', { command: 'pytest -q' }, 'tests')
   weak('Write', { file_path: '/g/notes/readme.md' }, 'doc-written', 'File created successfully at: /g/notes/readme.md')
   weak('Agent', { run_in_background: true, prompt: 'p' }, 'delegated')
   weak('Task', { run_in_background: true }, 'delegated')
+  weak('Agent', { prompt: 'p' }, 'agent-done')
   // A commit that also pushes is the stronger node.
   strong('Bash', { command: 'git commit -m x && git push' }, 'push')
   // No signal.
   expect(detectNode('Bash', { command: 'ls -la' })).toBeUndefined()
   expect(detectNode('Bash', { command: 'git status' })).toBeUndefined()
+  expect(detectNode('Bash', { command: 'git merge-base a b' })).toBeUndefined()
+  expect(detectNode('Bash', { command: 'gog gmail list' })).toBeUndefined()
+  expect(detectNode('Bash', { command: 'npm install' })).toBeUndefined()
   expect(detectNode('Write', { file_path: '/g/src/a.ts' })).toBeUndefined()
   expect(detectNode('Write', { file_path: '/g/notes/readme.md' }, 'The file /g/notes/readme.md has been updated')).toBeUndefined()
   expect(detectNode('Edit', { file_path: '/g/notes/readme.md' })).toBeUndefined()
   expect(detectNode('TodoWrite', { todos: [{ status: 'completed' }, { status: 'in_progress' }] })).toBeUndefined()
   expect(detectNode('TodoWrite', { todos: [] })).toBeUndefined()
-  expect(detectNode('Agent', { prompt: 'p' })).toBeUndefined()
-  expect(detectNode('Agent', { run_in_background: false })).toBeUndefined()
+  expect(detectNode('Agent', { prompt: 'p' })).toEqual({ kind: 'agent-done', strength: 'weak' })
+  expect(detectNode('Agent', { run_in_background: false })).toEqual({ kind: 'agent-done', strength: 'weak' })
 })
 
 test('detectNode: ignores errors and subagents', () => {
@@ -1028,7 +1048,7 @@ test('detectNode: ignores errors and subagents', () => {
 })
 
 testZh('detectNode: ignores subagent tool calls in the hook', async ($, on) => {
-  const w = engine(on)
+  const w = engine(on, { tokens: 190_000, window: 1_000_000 })
   await start($)
   await turnStart($, 't1')
   const r = (await $.tool.call({ tool: 'Bash', command: 'git push', agentId: 'sub1' } as never)) as Out
@@ -1085,11 +1105,11 @@ testZh('node nudge: once per turn', async ($, on) => {
 })
 
 testZh('node nudge: silent below the gate', async ($, on) => {
-  const w = engine(on, { tokens: 140_000, window: 1_000_000 })
+  const w = engine(on, { tokens: 120_000, window: 1_000_000 })
   await start($)
   await turnStart($, 't1')
   expect((await gitPush($)).context).toBeUndefined()
-  // Gate open but a weak signal needs floor + 5 = 20%.
+  // Gate open but a weak signal needs floor + 5 = 17.5%.
   w.usage.tokens = 170_000
   expect((await gitCommit($)).context).toBeUndefined()
   // A strong one does not.
@@ -1175,9 +1195,9 @@ testZh('self-check: long context with no node and no compaction', async ($, on) 
   expect(w.submits.length).toBe(1)
   expect(w.submits[0].text).toContain('[self-compact 自检]')
   expect(w.submits[0].text).toContain('31%')
-  // Below nudgeStartPct and no node: nothing.
+  // Below nudgeStartPct, below the work-block start and no node: nothing.
   const before = w.submits.length
-  w.usage.tokens = 200_000
+  w.usage.tokens = 150_000
   await turnStart($, 't2')
   await bash($)
   await turnComplete($, 't2')
@@ -1185,24 +1205,36 @@ testZh('self-check: long context with no node and no compaction', async ($, on) 
   expect(w.submits.length).toBe(before)
 })
 
-testZh('self-check: skipped when the turn ends with a question', async ($, on) => {
+testZh('self-check: a turn ending with a question still asks (completion summaries often do)', async ($, on) => {
   const w = engine(on)
   await start($)
   await turnStart($, 't1')
   await gitPush($)
   await turnComplete($, 't1', false, '要不要现在合并？')
-  await w.clock.advance(5_000)
-  expect(w.submits).toEqual([])
-  await turnStart($, 't2')
-  await gitPush($)
-  await turnComplete($, 't2', false, 'Merge it now?')
-  await w.clock.advance(5_000)
-  expect(w.submits).toEqual([])
-  await turnStart($, 't3')
-  await gitPush($)
-  await turnComplete($, 't3', false, '合并了 ')
   await w.clock.advance(1_500)
   expect(w.submits.length).toBe(1)
+  expect(w.submits[0].text).toContain('compact_now')
+})
+
+testZh('self-check: a work turn without a node signal asks', async ($, on) => {
+  const w = engine(on)
+  await start($)
+  await turnStart($, 't1')
+  await bash($)
+  await bash($)
+  await turnComplete($, 't1')
+  await w.clock.advance(1_500)
+  expect(w.submits.length).toBe(1)
+  expect(w.submits[0].text).toContain('上一轮做完了一整块工作')
+  expect(w.submits[0].text).toContain('20%')
+  // A single tool call is not a block of work.
+  const before = w.submits.length
+  w.usage.tokens = 190_000
+  await turnStart($, 't2')
+  await bash($)
+  await turnComplete($, 't2')
+  await w.clock.advance(5_000)
+  expect(w.submits.length).toBe(before)
 })
 
 testZh('self-check: skipped after AskUserQuestion', async ($, on) => {
@@ -1281,15 +1313,15 @@ test('self-check: disabled by turnEndCheck=false', { options: { language: 'zh', 
   expect(w.submits).toEqual([])
 })
 
-testZh('topic switch: hint added above floor+5', async ($, on) => {
-  const w = engine(on, { tokens: 170_000, window: 1_000_000 })
+testZh('topic switch: hint added as soon as the gate opens', async ($, on) => {
+  const w = engine(on, { tokens: 120_000, window: 1_000_000 })
   await start($)
   await userPrompt($, '换个需求')
   expect(w.submits.at(-1)?.context).toBeUndefined()
-  w.usage.tokens = 200_000
+  w.usage.tokens = 130_000
   await userPrompt($, '换个需求')
   expect(w.submits.at(-1)?.context?.join('\n')).toBe(
-    '[self-compact] 上下文 20%，插件已确认现在压缩划算。如果这条新需求和之前的工作无关，先调用 compact_now（next 写这条需求的原文要点）再结束本轮；压缩不会打断任务，压完会自动接着做。',
+    '[self-compact] 上下文 13%，插件已确认现在压缩划算。如果这条消息开启一个新工作块（换了话题，或隔了一阵重新接着做）而上一块已经收尾，先调用 compact_now（next 写这条需求的原文要点）再结束本轮；压缩不会打断任务，压完会自动接着做。',
   )
   // Slash commands and non-human prompts get none.
   await $.prompt.submit({ text: '/help', command: { name: 'help' }, origin: { kind: 'composer' }, wait: false } as never)

@@ -2,7 +2,7 @@ import type { EngineInterface, Register, Timer } from 'claude-code'
 
 export type Config = {
   floorPct: number
-  maxPostRatio: number
+  minSavingK: number
   nudgeStartPct: number
   nudgeStepPct: number
   urgentPct: number
@@ -14,11 +14,11 @@ export type Config = {
 }
 
 export const DEFAULTS: Config = {
-  floorPct: 15,
-  maxPostRatio: 0.55,
-  nudgeStartPct: 30,
+  floorPct: 10,
+  minSavingK: 40,
+  nudgeStartPct: 20,
   nudgeStepPct: 5,
-  urgentPct: 40,
+  urgentPct: 35,
   enabled: true,
   releaseStopHooks: false,
   autoNodes: true,
@@ -59,6 +59,7 @@ type Strings = {
   nodeNames: Record<NodeKind, string>
   nodeNudge: (kind: NodeKind, pct: number) => string
   selfCheck: (kind: NodeKind, pct: number) => string
+  selfCheckWork: (pct: number) => string
   selfCheckLong: (pct: number) => string
   topicSwitch: (pct: number) => string
   stopReason: string
@@ -123,14 +124,18 @@ export const STRINGS: Record<Lang, Strings> = {
     nudgeUrgent: pct => `[self-compact] Context ${pct}%, call compact_now at the next safe step, no need to wait for a perfect node.`,
     nodeNames: {
       push: 'git push',
-      pr: 'PR/MR create or merge',
+      pr: 'PR/MR create, review or merge',
       tag: 'git tag',
+      merge: 'git merge',
+      sent: 'outbound message sent',
       'spec-plan': 'spec/plan write',
       handoff: 'handoff note',
       'todos-done': 'todo list (all done)',
       commit: 'git commit',
+      tests: 'tests passed',
       'doc-written': 'new document',
       delegated: 'background delegation',
+      'agent-done': 'subagent returned',
     },
     nodeNudge: (kind, pct) =>
       `[self-compact] The ${STRINGS.en.nodeNames[kind]} just now looks like a node (context ${pct}%; the plugin has already checked that compacting now is worth it, so do not judge the size again). ` +
@@ -140,12 +145,16 @@ export const STRINGS: Record<Lang, Strings> = {
       `[self-compact self-check] The last turn showed a node signal (${kind}), context ${pct}%; the plugin has already checked that compacting now is worth it. ` +
       `Compacting does not stop or interrupt the task: work resumes automatically right after, so "don't stop" instructions are no reason to skip. ` +
       `Unless the current step is unfinished or a question to the user is open, call compact_now now (next: what to do next, or how to answer the user's latest message if nothing remains); otherwise reply with just "skip" and end.`,
+    selfCheckWork: pct =>
+      `[self-compact self-check] The last turn finished a block of work, context ${pct}%; the plugin has already checked that compacting now is worth it. ` +
+      `Compacting does not stop or interrupt the task: work resumes automatically right after, so "don't stop" instructions are no reason to skip. ` +
+      `If this block is closed (nothing unfinished, no answer awaited, nothing left running), call compact_now now (next: what to do next, or how to answer the user's latest message if nothing remains); otherwise reply with just "skip" and end.`,
     selfCheckLong: pct =>
       `[self-compact self-check] Context is ${pct}% and has not been compacted; the plugin has already checked that compacting now is worth it. ` +
       `Compacting does not stop or interrupt the task: work resumes automatically right after, so "don't stop" instructions are no reason to skip. ` +
       `Unless the current step is unfinished or a question to the user is open, call compact_now now (next: what to do next, or how to answer the user's latest message if nothing remains); otherwise reply with just "skip" and end.`,
     topicSwitch: pct =>
-      `[self-compact] Context ${pct}%; the plugin has already checked that compacting now is worth it. If this new request is unrelated to the earlier work, call compact_now first (next: the gist of this request, in its own words) and end the turn; compacting does not stop the task, work resumes automatically right after.`,
+      `[self-compact] Context ${pct}%; the plugin has already checked that compacting now is worth it. If this message opens a new block of work (a different topic, or picking the work up again after a pause) and the previous block is closed, call compact_now first (next: the gist of this request, in its own words) and end the turn; compacting does not stop the task, work resumes automatically right after.`,
     stopReason: 'compact queued: ending this turn so it can run, then work continues automatically.',
     preamble:
       'This compaction was started by the model at a task node. Write the summary from the handoff below: ' +
@@ -170,13 +179,13 @@ export const STRINGS: Record<Lang, Strings> = {
     contStanding: "Standing orders (user's words):",
     contPending: 'Pending:',
     contClosing: 'Continue with the next step; reread the handoff for details.',
-    description: cfg => `Compact your own context at a task node. The call only queues: the plugin compacts after this turn ends, then resumes you at \`next\`.
+    description: cfg => `Compact your own context at a task node. The call queues: the plugin compacts after the turn ends, then resumes you at \`next\`.
 
-Tiers (enforced): <${cfg.floorPct}% denied; ${cfg.floorPct}-${cfg.floorPct + NODE_MARGIN_PCT}% only at a phase handoff with a long next phase; >=${cfg.floorPct + NODE_MARGIN_PCT}% any clean node. Nudged at >=${Math.max(cfg.nudgeStartPct, cfg.floorPct)}%; at >=${cfg.urgentPct}% compact at the next safe step.
+Tiers (enforced): <${cfg.floorPct}% denied; ${cfg.floorPct}-${cfg.floorPct + NODE_MARGIN_PCT}% only at a big phase handoff; >=${cfg.floorPct + NODE_MARGIN_PCT}% any clean node. Nudged at >=${Math.max(cfg.nudgeStartPct, cfg.floorPct)}%, urgent at >=${cfg.urgentPct}%.
 
-Good nodes: unit done and verified, topic change, phase handoff, work delegated and waiting. Anti-nodes: question awaiting the user, unsent draft, new user rule not yet in standing_orders, mid retry/debug loop, unread agent result.
+Good nodes: a block done and verified (push, merge, PR, tests green, message sent, todos complete), topic change, phase handoff, subagent returned, delegation waiting. Anti-nodes: question awaiting you, unsent draft, new user rule not yet in standing_orders, mid retry/debug loop, unread agent result.
 
-The plugin flags nodes (push, PR, spec/plan) in tool results: act on a flag when the phase is closed.
+The plugin flags nodes (push, PR, tests, sent): act when the phase is closed.
 
 After "Queued", end the turn now: one line, call no more tools.
 `,
@@ -215,14 +224,18 @@ After "Queued", end the turn now: one line, call no more tools.
     nudgeUrgent: pct => `[self-compact] 上下文 ${pct}%，在下一个安全步骤调用 compact_now，不必等完美节点。`,
     nodeNames: {
       push: 'git push',
-      pr: 'PR/MR 创建或合并',
+      pr: 'PR/MR 创建、评审或合并',
       tag: 'git tag',
+      merge: 'git merge',
+      sent: '对外消息已发送',
       'spec-plan': 'spec/plan 落盘',
       handoff: '交接文档',
       'todos-done': '待办全部完成',
       commit: 'git commit',
+      tests: '测试通过',
       'doc-written': '新文档',
       delegated: '后台委派',
+      'agent-done': '子代理返回',
     },
     nodeNudge: (kind, pct) =>
       `[self-compact] 刚才的 ${STRINGS.zh.nodeNames[kind]} 像是一个节点（上下文 ${pct}%，插件已确认现在压缩划算，不用再判断大小）。` +
@@ -231,12 +244,16 @@ After "Queued", end the turn now: one line, call no more tools.
       `[self-compact 自检] 上一轮出现了节点信号（${kind}），上下文 ${pct}%，插件已确认现在压缩划算。` +
       `压缩不会打断任务，压完会自动接着做。` +
       `只要当前步骤已收尾、没有在等用户回答，现在就调用 compact_now（next 写接下来要做的事；没有就写怎么回应用户最新的消息）；否则只回复「不压」并结束。`,
+    selfCheckWork: pct =>
+      `[self-compact 自检] 上一轮做完了一整块工作，上下文 ${pct}%，插件已确认现在压缩划算。` +
+      `压缩不会打断任务，压完会自动接着做。` +
+      `如果这一块已经收尾（没有未完成的步骤、不在等用户回答、没有还在跑的任务），现在就调用 compact_now（next 写接下来要做的事；没有就写怎么回应用户最新的消息）；否则只回复「不压」并结束。`,
     selfCheckLong: pct =>
       `[self-compact 自检] 上下文已到 ${pct}%，一直没有压缩，插件已确认现在压缩划算。` +
       `压缩不会打断任务，压完会自动接着做。` +
       `只要当前步骤已收尾、没有在等用户回答，现在就调用 compact_now（next 写接下来要做的事；没有就写怎么回应用户最新的消息）；否则只回复「不压」并结束。`,
     topicSwitch: pct =>
-      `[self-compact] 上下文 ${pct}%，插件已确认现在压缩划算。如果这条新需求和之前的工作无关，先调用 compact_now（next 写这条需求的原文要点）再结束本轮；压缩不会打断任务，压完会自动接着做。`,
+      `[self-compact] 上下文 ${pct}%，插件已确认现在压缩划算。如果这条消息开启一个新工作块（换了话题，或隔了一阵重新接着做）而上一块已经收尾，先调用 compact_now（next 写这条需求的原文要点）再结束本轮；压缩不会打断任务，压完会自动接着做。`,
     stopReason: 'compact 已排队：先结束本轮以执行压缩，随后自动续接。',
     preamble:
       '这是模型在任务节点上主动发起的压缩，请按下面的交接单写摘要：' +
@@ -265,13 +282,13 @@ After "Queued", end the turn now: one line, call no more tools.
 
 门槛（插件强制，不够会被拒）：<${cfg.floorPct}% 拒绝；${cfg.floorPct}-${cfg.floorPct + NODE_MARGIN_PCT}% 只在大阶段交接压（spec→plan、plan→实现、MR 创建→review）且下一阶段明显够长；>=${cfg.floorPct + NODE_MARGIN_PCT}% 任何干净节点可压。>=${Math.max(cfg.nudgeStartPct, cfg.floorPct)}% 未压插件会提醒；>=${cfg.urgentPct}% 在下一个安全步骤就压，不必等完美节点。
 
-好节点：一个单元收尾转新需求（commit+push 已验证、合并、消息已发、ticket 已更新，无在跑 agent）；状态刚落盘；用户换话题；阶段交接；任务委派出去进入等待（pending 写明每个任务及回报方式）；用户说"等会 compact/继续/下一个"。
+好节点：一块工作收尾并已验证（push、合并、PR、测试通过、消息已发、待办全完成），转新需求；状态刚落盘；用户换话题；阶段交接；子代理返回；任务委派出去进入等待（pending 写明每个任务及回报方式）；用户说"等会 compact/继续/下一个"。
 
 反节点（不要调用）：有问题在等用户回答；草稿等用户说"发"；用户刚纠正或给了新规则/授权但未写进 standing_orders；轮询、重试、调试循环中途；API 刚报错；等用户登录或处理弹窗；后台 agent 结果已到未读。
 
 standing_orders 填用户"不要/必须"、授权、偏好的原话；pending 列每个在跑任务、待批准草稿、等外部回复的事及回报方式；next 写压缩后第一步具体动作。
 
-插件会在工具结果里标出节点（push、PR、spec/plan、待办全完成）：阶段已收尾就按标记压缩。
+插件会在工具结果里标出节点（push、PR、测试通过、消息已发、spec/plan、待办全完成）：阶段已收尾就按标记压缩。
 
 收到"已排队"后用一行话收尾本轮，不要再调用任何工具。`,
     node: '节点类型，一句话，如"plan 已落盘 → 开始实现"',
@@ -296,9 +313,9 @@ export function pctOf(u: Usage): number | undefined {
   return Math.round((u.tokens / u.window) * 1000) / 10
 }
 
-/** Smallest context worth compacting: the percent floor, or the size at which the estimated post-compact size is within maxPostRatio. */
+/** Smallest context worth compacting: the percent floor, or the size that still frees minSavingK tokens. */
 export function floorTokens(window: number, baseline: number, cfg: Config): number {
-  return Math.max((cfg.floorPct / 100) * window, (baseline + POST_COMPACT_EXTRA) / cfg.maxPostRatio)
+  return Math.max((cfg.floorPct / 100) * window, baseline + POST_COMPACT_EXTRA + cfg.minSavingK * 1_000)
 }
 
 export type GateResult = { ok: true; pct: number } | { ok: false; reason: string; pct?: number }
@@ -348,7 +365,7 @@ export function configFrom(options: Record<string, unknown> | undefined): Config
   const rs = o.releaseStopHooks
   return {
     floorPct: num(o.floorPct, DEFAULTS.floorPct),
-    maxPostRatio: num(o.maxPostRatio, DEFAULTS.maxPostRatio),
+    minSavingK: num(o.minSavingK, DEFAULTS.minSavingK),
     nudgeStartPct: num(o.nudgeStartPct, DEFAULTS.nudgeStartPct),
     nudgeStepPct: num(o.nudgeStepPct, DEFAULTS.nudgeStepPct),
     urgentPct: num(o.urgentPct, DEFAULTS.urgentPct),
@@ -494,17 +511,37 @@ export function continuationText(p: Continuation, lang: Lang = 'en'): string {
 
 // ---- node signals ----
 
-export type NodeKind = 'push' | 'pr' | 'tag' | 'spec-plan' | 'handoff' | 'todos-done' | 'commit' | 'doc-written' | 'delegated'
+export type NodeKind =
+  | 'push'
+  | 'pr'
+  | 'tag'
+  | 'merge'
+  | 'sent'
+  | 'spec-plan'
+  | 'handoff'
+  | 'todos-done'
+  | 'commit'
+  | 'tests'
+  | 'doc-written'
+  | 'delegated'
+  | 'agent-done'
 export type NodeSignal = { kind: NodeKind; strength: 'strong' | 'weak' }
 
 const STRONG_BASH: readonly [RegExp, NodeKind][] = [
   [/\bgit\s+push\b/, 'push'],
-  [/\b(gh\s+pr|glab\s+mr)\s+(create|merge)\b/, 'pr'],
+  [/\b(gh\s+pr|glab\s+mr)\s+(create|merge|review|comment|close)\b/, 'pr'],
+  [/\bgh\s+issue\s+(comment|close)\b/, 'pr'],
   [/\bgit\s+tag\b/, 'tag'],
+  [/\bgit\s+merge\b(?!-)/, 'merge'],
+  // Outbound messages: the "sent a message / replied" node in the design's list.
+  [/\b(gog|agent-slack|slack|outlook)\b[^|;&\n]*\s(send|reply|post)\b/, 'sent'],
 ]
 const SPEC_PLAN_PATH = /(^|\/)(specs?|plans?)\/[^/]+\.md$/
 const HANDOFF_BASENAME = /^(HANDOFF|handoff)/
 const COMMIT_CMD = /\bgit\s+commit\b/
+// A unit verified green is a node; it stays weak because loops rerun it.
+const TESTS_CMD =
+  /\b(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?test\b|\b(?:pytest|tox|nox|vitest|jest|rspec|phpunit|ctest)\b|\bgo\s+test\b|\bcargo\s+test\b|\bdotnet\s+test\b|\b(?:mvn|gradlew?)\b[^|;&\n]*\btest\b|\bmake\s+(?:test|check)\b/
 
 const asObj = (v: unknown): Record<string, unknown> | undefined =>
   typeof v === 'object' && v !== null ? (v as Record<string, unknown>) : undefined
@@ -537,7 +574,8 @@ export function detectNode(tool: string, input: unknown, result?: unknown): Node
     const cmd = inp.command
     if (typeof cmd !== 'string') return undefined
     for (const [re, kind] of STRONG_BASH) if (re.test(cmd)) return strong(kind)
-    return COMMIT_CMD.test(cmd) ? weak('commit') : undefined
+    if (COMMIT_CMD.test(cmd)) return weak('commit')
+    return TESTS_CMD.test(cmd) ? weak('tests') : undefined
   }
   if (tool === 'Write' || tool === 'Edit' || tool === 'MultiEdit') {
     const p = inp.file_path ?? inp.path
@@ -553,7 +591,7 @@ export function detectNode(tool: string, input: unknown, result?: unknown): Node
     return items.length > 0 && items.every(t => asObj(t)?.status === 'completed') ? strong('todos-done') : undefined
   }
   if (tool === 'Agent' || tool === 'Task') {
-    return inp.run_in_background === true || inp.run_in_background === 'true' ? weak('delegated') : undefined
+    return inp.run_in_background === true || inp.run_in_background === 'true' ? weak('delegated') : weak('agent-done')
   }
   return undefined
 }
@@ -603,6 +641,8 @@ type State = {
   turnSignal?: NodeSignal
   nodeNudged: boolean
   compactCalled: boolean
+  // Main-session tool calls in the current turn: a turn that did real work is a work-block node.
+  turnToolCalls: number
   // Self-check: context pct at the last check per key (node kind or "pct"), no tool call since it, and which turn answers it.
   checkedAt: Map<string, number>
   idleSinceCheck: boolean
@@ -627,6 +667,7 @@ export const state: State = {
   forceFailed: false,
   nodeNudged: false,
   compactCalled: false,
+  turnToolCalls: 0,
   checkedAt: new Map(),
   idleSinceCheck: false,
   awaitingCheck: false,
@@ -927,6 +968,7 @@ function resetConversation(): void {
   state.turnSignal = undefined
   state.nodeNudged = false
   state.compactCalled = false
+  state.turnToolCalls = 0
   state.checkedAt.clear()
   state.idleSinceCheck = false
   state.awaitingCheck = false
@@ -946,13 +988,15 @@ export const NODE_MARGIN_PCT = 5
 export const CHECK_STEP_PCT = 5
 
 /** Context state for the autonomous triggers; undefined while they must stay quiet. */
-async function triggerGate($: Dollar): Promise<{ ok: true; pct: number } | undefined> {
+async function triggerGate($: Dollar): Promise<{ pct: number; floorPct: number } | undefined> {
   if (!state.cfg.autoNodes || !state.cfg.enabled || !state.interactive) return undefined
   if (state.pending !== undefined || state.compacting) return undefined
   if ((await $.env.get('DISABLE_COMPACT')) === '1') return undefined
   const u = (await $.session.usage()).context
   const g = gate({ tokens: u.tokens, window: u.window }, state.baseline, state.cfg)
-  return g.ok ? g : undefined
+  if (!g.ok || !u.window) return undefined
+  const floorPct = (floorTokens(u.window, state.baseline ?? DEFAULT_BASELINE, state.cfg) / u.window) * 100
+  return { pct: g.pct, floorPct }
 }
 
 /** After a main-session tool returns: record the node signal and, at most once per turn, build the nudge line. */
@@ -964,26 +1008,32 @@ async function onNodeSignal($: Dollar, e: Record<string, unknown>, r: unknown): 
   if (state.nodeNudged) return undefined
   const g = await triggerGate($)
   if (g === undefined) return undefined
-  if (sig.strength === 'weak' && g.pct < state.cfg.floorPct + NODE_MARGIN_PCT) return undefined
+  if (sig.strength === 'weak' && g.pct < g.floorPct + NODE_MARGIN_PCT) return undefined
   state.nodeNudged = true
   await logLine($, { result: 'node-nudge', kind: sig.kind, pct: g.pct })
   return S().nodeNudge(sig.kind, g.pct)
 }
 
-const ENDS_WITH_QUESTION = /[?？]\s*$/
+// A main turn with at least this many tool calls did a block of work.
+export const WORK_TURN_MIN_CALLS = 2
 
-/** Turn-end fallback: when a node passed or the context stayed high without compaction, ask Claude once whether to compact. */
-async function scheduleSelfCheck($: Dollar, answer: string): Promise<void> {
+/** Turn-end fallback: after a node, a block of work or a long uncompacted stretch, ask Claude once whether to compact. */
+async function scheduleSelfCheck($: Dollar): Promise<void> {
   if (!state.cfg.turnEndCheck || state.compactCalled || state.idleSinceCheck) return
-  if (state.lastTool === 'AskUserQuestion' || ENDS_WITH_QUESTION.test(answer)) return
+  if (state.lastTool === 'AskUserQuestion') return
   const g = await triggerGate($)
   if (g === undefined) return
   const sig = state.turnSignal
+  const weakOk = g.pct >= g.floorPct + NODE_MARGIN_PCT
+  const workStart = Math.max(g.floorPct, state.cfg.nudgeStartPct - NODE_MARGIN_PCT)
   let key: string
   let text: string
-  if (sig !== undefined && (sig.strength === 'strong' || g.pct >= state.cfg.floorPct + NODE_MARGIN_PCT)) {
+  if (sig !== undefined && (sig.strength === 'strong' || weakOk)) {
     key = sig.kind
     text = S().selfCheck(sig.kind, g.pct)
+  } else if (state.turnToolCalls >= WORK_TURN_MIN_CALLS && g.pct >= workStart) {
+    key = 'work'
+    text = S().selfCheckWork(g.pct)
   } else if (g.pct >= state.cfg.nudgeStartPct) {
     key = 'pct'
     text = S().selfCheckLong(g.pct)
@@ -1010,10 +1060,10 @@ async function fireSelfCheck($: Dollar, key: string, text: string): Promise<void
   void Promise.resolve($.prompt.submit({ text })).catch(() => {})
 }
 
-/** Hint for a human prompt: if it changes topic, compact first. */
+/** Hint for a human prompt: a new block of work starts here, compact first if the previous one is closed. */
 async function topicHint($: Dollar): Promise<string | undefined> {
   const g = await triggerGate($)
-  return g !== undefined && g.pct >= state.cfg.floorPct + NODE_MARGIN_PCT ? S().topicSwitch(g.pct) : undefined
+  return g === undefined ? undefined : S().topicSwitch(g.pct)
 }
 
 export const register: Register = (on, options) => {
@@ -1045,6 +1095,7 @@ export const register: Register = (on, options) => {
       state.turnSignal = undefined
       state.nodeNudged = false
       state.compactCalled = false
+      state.turnToolCalls = 0
       state.checkTurn = state.awaitingCheck
       state.awaitingCheck = false
       state.checkTimer?.cancel()
@@ -1076,7 +1127,7 @@ export const register: Register = (on, options) => {
     }
     if (!e.isAborted) {
       try {
-        await scheduleSelfCheck($, typeof e.answer === 'string' ? e.answer.trim() : '')
+        await scheduleSelfCheck($)
       } catch {
         // The self-check is best effort.
       }
@@ -1110,6 +1161,7 @@ export const register: Register = (on, options) => {
     }
     if (isSub) return next(e)
     state.lastTool = e.tool
+    state.turnToolCalls++
     state.idleSinceCheck = false
     const p = state.pending
     if (p !== undefined) p.toolCallsSince++

@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.0 - 2026-11-13
+
+- Changed: the gate's second rule is now an absolute saving. `minSavingK` (default 40k) replaces `maxPostRatio`: `need = max(floorPct x window, baseline + 20k + minSavingK x 1k)`. With a 65k baseline the floor is 125k, or 12.5% of a 1M window and 62.5% of a 200k one; 0.2.0 demanded 77% there, which shut the tool on small windows.
+- Changed: defaults `floorPct` 10 (was 15), `nudgeStartPct` 20 (was 30), `urgentPct` 35 (was 40). The 83 compactions in the author's history have a median of 262k tokens (26% of a 1M window) and a 10th percentile of 149k, so the old nudge line and floor fired later than the user's own habit.
+- Added: node signals `git merge`, `gh pr review`/`comment`/`close`, `gh issue comment`/`close`, outbound sends through `gog`, `agent-slack`, `slack` or `outlook` (strong), passing test commands, and a foreground subagent returning (weak).
+- Added: a work-block self-check. A main turn with two or more tool calls is treated as a block of work even without a git or PR signal, so the turn-end check no longer depends on the node detector. It fires from `nudgeStartPct - 5` and says "the last turn finished a block of work".
+- Changed: a turn ending with a question no longer suppresses the self-check. Completion summaries often end that way, and the history shows compactions at exactly those points; `AskUserQuestion` still suppresses it.
+- Changed: the block-start hint replaces the topic-switch hint and fires on every human prompt once the gate is open, wording the new block as either a new topic or picking work up after a pause. The context had to be 5 points above the floor before.
+- Why: the user's own compaction history is dominated by manual `/compact` typed right after a block ended, at 15-40% of a 1M window. The 0.2.0 triggers waited for a git/PR node or 30% fill, so most of those moments passed without a call.
+
 ## 0.2.0 - 2026-11-12
 
 - Added: node detection (`detectNode`): `git push`, PR/MR create or merge, `git tag`, spec/plan/handoff writes and all-completed todo lists are strong signals; `git commit`, a new `.md` file and a background agent launch are weak ones. A one-line flag rides the tool result when the gate is open.

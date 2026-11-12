@@ -11,7 +11,7 @@ Claude gets a `compact_now` tool. At a clean node (spec written, unit finished, 
 /plugin install self-compact@claude-code-self-compact
 ```
 
-Needs Claude Code 2.1.287 or later. Built for 1M-token windows; on a 200k window the size gate keeps the tool effectively closed and auto-compact does the work.
+Needs Claude Code 2.1.287 or later. Tuned on 1M-token windows; on a 200k window the floor works out to about 62.5% fill, so auto-compact still owns the late stage.
 
 ## Configuration
 
@@ -20,14 +20,14 @@ Set through the plugin settings (`userConfig`), for example `claude plugin confi
 | Option | Default | Meaning |
 | --- | --- | --- |
 | `language` | en | `en` or `zh`: language of the tool description, denials, toasts, nudges and continuation prompt; any other value falls back to `en` |
-| `floorPct` | 15 | hard floor, percent of the window |
-| `maxPostRatio` | 0.55 | estimated post-compact size over current size |
-| `nudgeStartPct` | 30 | first nudge (raised to the floor when higher) |
+| `floorPct` | 10 | hard floor, percent of the window |
+| `minSavingK` | 40 | the floor is also at least baseline + 20k + this many thousand tokens |
+| `nudgeStartPct` | 20 | first nudge (raised to the floor when higher) |
 | `nudgeStepPct` | 5 | gap between nudges |
-| `urgentPct` | 40 | escalated nudge wording |
+| `urgentPct` | 35 | escalated nudge wording |
 | `releaseStopHooks` | false | true: a queued compaction ends a turn that another Stop hook (such as /goal) holds open. Only works on personal (non-managed) setups; the built-in guard skips user mods' Stop hooks elsewhere (see FAQ) |
-| `autoNodes` | true | Autonomous triggers: a one-line flag after node-like tool calls (push, PR, spec/plan written, todos done), a turn-end self-check, and a topic-switch hint on new requests. false turns all three off |
-| `turnEndCheck` | true | The turn-end self-check only (needs `autoNodes`): after a node or a long uncompacted stretch, one extra turn asks Claude whether to compact |
+| `autoNodes` | true | Autonomous triggers: a one-line flag after node-like tool calls (push, merge, PR, tests green, message sent, spec/plan written, todos done), a turn-end self-check, and a hint on every human prompt. false turns all three off |
+| `turnEndCheck` | true | The turn-end self-check only (needs `autoNodes`): after a node, a turn that did real work, or a long uncompacted stretch, one extra turn asks Claude whether to compact |
 | `enabled` | true | false: the tool stays registered, every call is denied, no nudges |
 
 `DISABLE_COMPACT=1` in the environment also denies every call.
