@@ -65,15 +65,15 @@ After that there is nothing to run. Claude decides when to call the tool.
 
 Two layers. The plugin enforces a floor. Claude decides everything above it, guided by the tool description and by nudges.
 
-The plugin refuses a call unless both hold: tokens are at least `floorPct` of the window, and the estimated post-compact size (session baseline + 20k) is at most `maxPostRatio` of the current size. The baseline is the context size of the session's first main request, read only when the conversation has at most 3 messages (65k otherwise, for example on a resumed session).
+The plugin refuses a call unless the tokens are at least `floorPct` of the window and at least `minSavingK` above the estimated post-compact size (session baseline + 20k). The baseline is the context size of the session's first main request, read only when the conversation has at most 3 messages (65k otherwise, for example on a resumed session). With the defaults and a 65k baseline the floor is 125k, or 12.5% of a 1M window; on a 200k window the same 125k is 62.5%, so the tool now opens there instead of staying shut.
 
 | Context | Behavior |
 | --- | --- |
-| below 15% | denied by the plugin |
-| 15-20% | big phase handoffs only (spec to plan, plan to implementation, MR up to review) |
-| 20% and up | any clean node |
-| 30% and up | nudge, then again every 5% |
-| 40% and up | nudge wording escalates: compact at the next safe step |
+| below 10% | denied by the plugin |
+| 10-15% | big phase handoffs only (spec to plan, plan to implementation, MR up to review) |
+| 15% and up | any clean node |
+| 20% and up | nudge, then again every 5% |
+| 35% and up | nudge wording escalates: compact at the next safe step |
 
 Nudges ride on the next text tool result, or on the next prompt's context. They are silent while a request is queued or compacting, in subagents, in non-interactive sessions and when disabled.
 
@@ -81,11 +81,11 @@ Nudges ride on the next text tool result, or on the next prompt's context. They 
 
 Good nodes:
 
-- A unit of work ends and a new request starts (commit and push verified, merge confirmed, message sent, ticket updated), with no agents running.
+- A block of work ends (push or merge verified, tests green, PR opened or merged, message sent, todos complete), with no agents running.
 - State was just written to disk (handoff file, memory, skill) and pushed.
-- You change topic.
+- You change topic, or pick the work up again after a pause.
 - A phase handoff: spec or plan written, next step named, merge request created.
-- Work was delegated and Claude is now waiting, with every running task and its reporting route listed in `pending`.
+- A subagent returned, or work was delegated and Claude is now waiting, with every running task and its reporting route listed in `pending`.
 - You say "compact", "continue" or "next".
 
 Anti-nodes, where Claude is told not to compact:
@@ -102,9 +102,9 @@ The plugin checks one of these itself: if the last tool call was `AskUserQuestio
 
 The tool description alone does not make Claude compact: in a live session it finished a phase and moved on. The plugin therefore adds three triggers, so you never have to mention compaction:
 
-- **Node flag.** After a `git push`, a PR/MR creation or merge, a `git tag`, a spec/plan/handoff file write, or a todo list with every item completed, one line is attached to that tool result when the gate is open. Weaker signals (`git commit`, a new `.md` file, a background agent launch) are flagged only 5 points above the floor. At most one flag per turn.
-- **Turn-end self-check.** If a node was flagged and `compact_now` was not called, or the context passed the nudge start without a compaction, the plugin submits one short prompt after the turn ends. Claude either calls `compact_now` or answers "skip". It is skipped when the turn ended with a question, is limited to one check per node kind per 5 points of growth, and never repeats without new tool activity.
-- **Topic switch.** On a human prompt at least 5 points above the floor, a model-only line suggests compacting first if the request is unrelated to the earlier work.
+- **Node flag.** After a `git push`, `git merge`, a PR/MR create, review or merge, a `git tag`, a message sent through `gog`, `agent-slack` or `outlook`, a spec/plan/handoff file write, or a todo list with every item completed, one line is attached to that tool result when the gate is open. Weaker signals (`git commit`, tests passed, a new `.md` file, a background agent launch, a subagent returning) are flagged only 5 points above the floor. At most one flag per turn.
+- **Turn-end self-check.** After a turn that ends, the plugin submits one short prompt when a node was flagged, when the turn did real work (two or more main-session tool calls) and the context is near the nudge start, or when the context passed the nudge start without a compaction. Claude either calls `compact_now` or answers "skip". A turn ending in a question still asks, because completion summaries often end that way; only `AskUserQuestion` suppresses it. A check is limited to one per trigger per 5 points of growth and never repeats without new tool activity.
+- **Block-start hint.** On every human prompt once the gate is open, a model-only line suggests compacting first when the message opens a new block of work (a different topic, or picking work up after a pause) and the previous block is closed.
 
 `autoNodes` turns all three off; `turnEndCheck` turns off only the self-check. Compaction always resumes work: the continuation prompt is sent after every successful compaction.
 
@@ -120,15 +120,15 @@ After compaction the same standing orders and pending items arrive again, verbat
 
 A compaction costs tokens and time: it generates a summary and re-caches what remains. It pays off when enough calls follow at the smaller size.
 
-Assumptions: relative to the input price, cache read is 0.1x, 1-hour cache write 2x and output 5x. The context left after a compaction is about 80k tokens (median measured over the author's sessions). One compaction costs about `0.1 x C + 105k` input-equivalent tokens, where `C` is the context size before and 105k is an estimate for generating the summary and re-caching the remainder. Each later call saves `0.1 x (C - 80k)`.
+Assumptions: relative to the input price, cache read is 0.1x, 1-hour cache write 2x and output 5x. The context left after a compaction is about 20k tokens (median over 83 compactions in the author's sessions). One compaction costs about `0.1 x C + 105k` input-equivalent tokens, where `C` is the context size before and 105k is a conservative fixed estimate for the summary and re-caching. Each later call saves `0.1 x (C - 20k)`.
 
 | Context before | Cost of compacting | Saved per call | Break-even |
 | --- | --- | --- | --- |
-| 150k | 120k | 7k | about 17 calls |
-| 200k | 125k | 12k | about 10 calls |
-| 300k | 135k | 22k | about 6 calls |
+| 100k | 115k | 8k | about 14 calls |
+| 150k | 120k | 13k | about 9 calls |
+| 200k | 125k | 18k | about 7 calls |
 
-This is why the floor sits near 150k tokens and why compacting early or often is a net loss. A compaction takes 30-55 seconds on the measured setup. These numbers are estimates; `log.jsonl` records before and after percentages so you can check them on your own sessions.
+A compaction leaves about 20k behind on the measured setup, so the saving per call is 0.1 x (context - 20k). The floor sits near 100k tokens on a 1M window (10%) and near 80k on a 200k window (baseline + 60k): below that, compacting early costs more than it saves. A compaction takes 30-55 seconds. These numbers are estimates; `log.jsonl` records before and after percentages so you can check them on your own sessions.
 
 ## Configuration
 
@@ -137,14 +137,14 @@ Set the options through the plugin settings (`userConfig` in `plugin.json`), for
 | Option | Default | Meaning |
 | --- | --- | --- |
 | `language` | en | `en` or `zh`: language of the tool description, denials, toasts, nudges and continuation prompt; any other value falls back to `en` |
-| `floorPct` | 15 | hard floor, percent of the window |
-| `maxPostRatio` | 0.55 | estimated post-compact size over current size |
-| `nudgeStartPct` | 30 | first nudge (raised to the floor when higher) |
+| `floorPct` | 10 | hard floor, percent of the window |
+| `minSavingK` | 40 | the floor is also at least baseline + 20k + this many thousand tokens, so a small window still gets a worthwhile saving |
+| `nudgeStartPct` | 20 | first nudge (raised to the floor when higher) |
 | `nudgeStepPct` | 5 | gap between nudges |
-| `urgentPct` | 40 | escalated nudge wording |
+| `urgentPct` | 35 | escalated nudge wording |
 | `releaseStopHooks` | false | true: a queued compaction ends a turn that another Stop hook (such as /goal) holds open. Only works on personal (non-managed) setups; the built-in guard skips user mods' Stop hooks elsewhere (see FAQ) |
-| `autoNodes` | true | Autonomous triggers: a one-line flag after node-like tool calls (push, PR, spec/plan written, todos done), a turn-end self-check, and a topic-switch hint on new requests. false turns all three off |
-| `turnEndCheck` | true | The turn-end self-check only (needs `autoNodes`): after a node or a long uncompacted stretch, one extra turn asks Claude whether to compact |
+| `autoNodes` | true | Autonomous triggers: a one-line flag after node-like tool calls (push, merge, PR, tests green, message sent, spec/plan written, todos done), a turn-end self-check, and a hint on every human prompt once the gate is open. false turns all three off |
+| `turnEndCheck` | true | The turn-end self-check only (needs `autoNodes`): after a node, a turn that did real work, or a long uncompacted stretch, one extra turn asks Claude whether to compact |
 | `enabled` | true | false: the tool stays registered, every call is denied, no nudges |
 
 `DISABLE_COMPACT=1` in the environment also denies every call. Handoff content (your standing orders, decisions) stays in whatever language you used; `language` only changes the plugin's own text.

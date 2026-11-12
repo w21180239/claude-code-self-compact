@@ -1,6 +1,6 @@
 {
   "name": "self-compact",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Claude Code plugin that lets Claude compact its own context at task milestones: agent-initiated /compact with self-written handoff instructions, gated by context size, then auto-continue. Smarter auto-compact for long sessions. English and Chinese UI.",
   "author": { "name": "w21180239" },
   "license": "MIT",
@@ -18,19 +18,19 @@
       "type": "number",
       "title": "Compaction floor (%)",
       "description": "compact_now is denied while the context is below this percentage of the window",
-      "default": 15
+      "default": 10
     },
-    "maxPostRatio": {
+    "minSavingK": {
       "type": "number",
-      "title": "Max post/pre size ratio",
-      "description": "Upper bound on the estimated post-compaction size as a share of the current size; above it the call is denied",
-      "default": 0.55
+      "title": "Minimum saving (k tokens)",
+      "description": "compact_now is denied unless the estimated post-compaction size (baseline + 20k) leaves at least this many thousand tokens to free. Scales the floor to small windows",
+      "default": 40
     },
     "nudgeStartPct": {
       "type": "number",
       "title": "Start nudging (%)",
       "description": "Context percentage at which Claude starts being reminded to look for a node",
-      "default": 30
+      "default": 20
     },
     "nudgeStepPct": {
       "type": "number",
@@ -42,7 +42,7 @@
       "type": "number",
       "title": "Urgent nudge (%)",
       "description": "From this percentage the reminder escalates to compacting at the next safe step",
-      "default": 40
+      "default": 35
     },
     "enabled": {
       "type": "boolean",
