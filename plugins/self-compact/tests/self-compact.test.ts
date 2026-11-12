@@ -1048,7 +1048,8 @@ testZh('node nudge: rides the tool result after git push', async ($, on) => {
   await turnStart($, 't1')
   const r = await gitPush($)
   expect(r.context?.join('\n')).toBe(
-    '[self-compact] 刚才的 git push 像是一个节点（上下文 20%）。如果这一步收尾了当前阶段、没有在等用户回答，就在本轮结束前调用 compact_now；否则忽略这条。',
+    '[self-compact] 刚才的 git push 像是一个节点（上下文 20%，插件已确认现在压缩划算，不用再判断大小）。' +
+      '压缩不会打断任务，压完会自动接着做；只要这一步已收尾、没有在等用户回答，就在本轮结束前调用 compact_now。',
   )
   const row = w.log().find(l => l.result === 'node-nudge')
   expect(row?.kind).toBe('push')
@@ -1123,8 +1124,9 @@ testZh('self-check: submitted after a node turn without compact_now', async ($, 
   await w.clock.advance(1)
   expect(w.submits.length).toBe(1)
   expect(w.submits[0].text).toBe(
-    '[self-compact 自检] 上一轮出现了节点信号（push），上下文 20%。如果当前阶段已经收尾、你没有在等用户回答，现在调用 compact_now 写好交接单；' +
-      '如果后面没有要自动继续的工作，next 填「怎么处理用户最新这条消息」，或一句给用户的收尾小结。如果不是好时机，只回复「不压」两个字并结束，不要做别的。',
+    '[self-compact 自检] 上一轮出现了节点信号（push），上下文 20%，插件已确认现在压缩划算。' +
+      '压缩不会打断任务，压完会自动接着做。' +
+      '只要当前步骤已收尾、没有在等用户回答，现在就调用 compact_now（next 写接下来要做的事；没有就写怎么回应用户最新的消息）；否则只回复「不压」并结束。',
   )
   expect(w.log().some(l => l.result === 'self-check' && l.kind === 'push')).toBe(true)
 })
@@ -1287,7 +1289,7 @@ testZh('topic switch: hint added above floor+5', async ($, on) => {
   w.usage.tokens = 200_000
   await userPrompt($, '换个需求')
   expect(w.submits.at(-1)?.context?.join('\n')).toBe(
-    '[self-compact] 上下文 20%。如果这条新需求和之前的工作无关，先调用 compact_now（next 写这条需求的原文要点）再结束本轮，压缩后会自动继续。',
+    '[self-compact] 上下文 20%，插件已确认现在压缩划算。如果这条新需求和之前的工作无关，先调用 compact_now（next 写这条需求的原文要点）再结束本轮；压缩不会打断任务，压完会自动接着做。',
   )
   // Slash commands and non-human prompts get none.
   await $.prompt.submit({ text: '/help', command: { name: 'help' }, origin: { kind: 'composer' }, wait: false } as never)
@@ -1340,4 +1342,48 @@ test('configFrom: autoNodes and turnEndCheck default on, accept booleans and str
   expect(configFrom({ autoNodes: false, turnEndCheck: 'false' })).toMatchObject({ autoNodes: false, turnEndCheck: false })
   expect(configFrom({ autoNodes: '0' }).autoNodes).toBe(false)
   expect(configFrom({ autoNodes: 'true' }).autoNodes).toBe(true)
+})
+
+test('tool description: tiers come from config', { options: { floorPct: 1 } }, async ($, on) => {
+  const w = engine(on)
+  await start($)
+  const d = w.registered[0].description
+  expect(d).toContain('<1% denied')
+  expect(d).toContain('1-6%')
+  expect(d).toContain('>=6%')
+  expect(d).not.toContain('15%')
+  expect(d.length <= 700).toBe(true)
+})
+
+test('tool description (zh): tiers come from config', { options: { language: 'zh', floorPct: 1, urgentPct: 50 } }, async ($, on) => {
+  const w = engine(on)
+  await start($)
+  const d = w.registered[0].description
+  expect(d).toContain('<1% 拒绝')
+  expect(d).toContain('1-6%')
+  expect(d).toContain('>=50%')
+  expect(d).not.toContain('15%')
+  expect(d.length <= 640).toBe(true)
+})
+
+test('nudge text: says the gate passed and compaction does not stop the task', async ($, on) => {
+  engine(on)
+  await start($)
+  await turnStart($, 't1')
+  const r = await gitPush($)
+  const t = r.context?.join('\n') ?? ''
+  expect(t).toContain('already checked')
+  expect(t).toContain('do not judge the size again')
+  expect(t).toContain('does not stop or interrupt the task')
+})
+
+testZh('nudge text (zh): says the gate passed and compaction does not stop the task', async ($, on) => {
+  engine(on)
+  await start($)
+  await turnStart($, 't1')
+  const r = await gitPush($)
+  const t = r.context?.join('\n') ?? ''
+  expect(t).toContain('插件已确认现在压缩划算')
+  expect(t).toContain('不用再判断大小')
+  expect(t).toContain('压缩不会打断任务')
 })
