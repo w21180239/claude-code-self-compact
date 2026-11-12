@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.0 - 2026-11-12
+
+- Added: node detection (`detectNode`): `git push`, PR/MR create or merge, `git tag`, spec/plan/handoff writes and all-completed todo lists are strong signals; `git commit`, a new `.md` file and a background agent launch are weak ones. A one-line flag rides the tool result when the gate is open.
+- Added: turn-end self-check. After a flagged node without a `compact_now` call, or a long uncompacted stretch, the plugin submits one short prompt asking Claude to compact or answer "skip". It skips turns that end with a question, limits itself to one check per node kind per 5 points of growth, and logs `self-check`, `self-check:compacted` and `self-check:declined`.
+- Added: topic-switch hint. A human prompt at least 5 points above the floor carries a model-only line suggesting compaction first when the request is unrelated.
+- Added: `autoNodes` (all three triggers) and `turnEndCheck` (self-check only) options, both default on.
+- Why: a live test showed that the tool description alone never triggers compaction; Claude finished a phase and moved on. The plugin now supplies the trigger so the user never has to mention compaction.
+
 ## 0.1.2 - 2026-11-12
 
 - Changed: `releaseStopHooks` defaults to off. Where Claude Code's built-in guard (`cc-plugin-sec-default`) loads (Team/Enterprise logins, machines with managed settings), user mods' `classic.Stop` hooks never run and Claude Code warned at every turn end. The option still works on personal setups.

@@ -26,6 +26,8 @@ Set through the plugin settings (`userConfig`), for example `claude plugin confi
 | `nudgeStepPct` | 5 | gap between nudges |
 | `urgentPct` | 40 | escalated nudge wording |
 | `releaseStopHooks` | false | true: a queued compaction ends a turn that another Stop hook (such as /goal) holds open. Only works on personal (non-managed) setups; the built-in guard skips user mods' Stop hooks elsewhere (see FAQ) |
+| `autoNodes` | true | Autonomous triggers: a one-line flag after node-like tool calls (push, PR, spec/plan written, todos done), a turn-end self-check, and a topic-switch hint on new requests. false turns all three off |
+| `turnEndCheck` | true | The turn-end self-check only (needs `autoNodes`): after a node or a long uncompacted stretch, one extra turn asks Claude whether to compact |
 | `enabled` | true | false: the tool stays registered, every call is denied, no nudges |
 
 `DISABLE_COMPACT=1` in the environment also denies every call.

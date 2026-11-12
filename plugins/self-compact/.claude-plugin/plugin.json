@@ -1,6 +1,6 @@
 {
   "name": "self-compact",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "description": "Claude Code plugin that lets Claude compact its own context at task milestones: agent-initiated /compact with self-written handoff instructions, gated by context size, then auto-continue. Smarter auto-compact for long sessions. English and Chinese UI.",
   "author": { "name": "w21180239" },
   "license": "MIT",
@@ -55,6 +55,18 @@
       "title": "Release Stop hooks",
       "description": "Let a queued compaction end a turn that another Stop hook (such as /goal) holds open. Has no effect where Claude Code's built-in guard (cc-plugin-sec-default) loads — Team/Enterprise logins and machines with managed settings — because user mods' Stop hooks don't run there.",
       "default": false
+    },
+    "autoNodes": {
+      "type": "boolean",
+      "title": "Autonomous node triggers",
+      "description": "Flag node-like tool calls (push, PR, spec/plan written, todos done), run a turn-end self-check and hint on topic switches so Claude compacts without being asked. Off disables all three",
+      "default": true
+    },
+    "turnEndCheck": {
+      "type": "boolean",
+      "title": "Turn-end self-check",
+      "description": "After a node or a long uncompacted stretch, submit one short prompt asking Claude whether to compact. Needs Autonomous node triggers",
+      "default": true
     }
   }
 }

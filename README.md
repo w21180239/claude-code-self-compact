@@ -98,6 +98,16 @@ Anti-nodes, where Claude is told not to compact:
 
 The plugin checks one of these itself: if the last tool call was `AskUserQuestion`, the request is denied.
 
+### Autonomous triggers
+
+The tool description alone does not make Claude compact: in a live session it finished a phase and moved on. The plugin therefore adds three triggers, so you never have to mention compaction:
+
+- **Node flag.** After a `git push`, a PR/MR creation or merge, a `git tag`, a spec/plan/handoff file write, or a todo list with every item completed, one line is attached to that tool result when the gate is open. Weaker signals (`git commit`, a new `.md` file, a background agent launch) are flagged only 5 points above the floor. At most one flag per turn.
+- **Turn-end self-check.** If a node was flagged and `compact_now` was not called, or the context passed the nudge start without a compaction, the plugin submits one short prompt after the turn ends. Claude either calls `compact_now` or answers "skip". It is skipped when the turn ended with a question, is limited to one check per node kind per 5 points of growth, and never repeats without new tool activity.
+- **Topic switch.** On a human prompt at least 5 points above the floor, a model-only line suggests compacting first if the request is unrelated to the earlier work.
+
+`autoNodes` turns all three off; `turnEndCheck` turns off only the self-check. Compaction always resumes work: the continuation prompt is sent after every successful compaction.
+
 ## What the handoff keeps
 
 `compact_now` takes a structured handoff: `node`, `objective`, `standing_orders` (your rules and permissions, in your words), `decisions` (with reasons), `artifacts`, `pending` (each running task and how it reports), `done`, `next`, and an optional `drop`. A call missing a required field is denied and the field is named.
@@ -133,6 +143,8 @@ Set the options through the plugin settings (`userConfig` in `plugin.json`), for
 | `nudgeStepPct` | 5 | gap between nudges |
 | `urgentPct` | 40 | escalated nudge wording |
 | `releaseStopHooks` | false | true: a queued compaction ends a turn that another Stop hook (such as /goal) holds open. Only works on personal (non-managed) setups; the built-in guard skips user mods' Stop hooks elsewhere (see FAQ) |
+| `autoNodes` | true | Autonomous triggers: a one-line flag after node-like tool calls (push, PR, spec/plan written, todos done), a turn-end self-check, and a topic-switch hint on new requests. false turns all three off |
+| `turnEndCheck` | true | The turn-end self-check only (needs `autoNodes`): after a node or a long uncompacted stretch, one extra turn asks Claude whether to compact |
 | `enabled` | true | false: the tool stays registered, every call is denied, no nudges |
 
 `DISABLE_COMPACT=1` in the environment also denies every call. Handoff content (your standing orders, decisions) stays in whatever language you used; `language` only changes the plugin's own text.

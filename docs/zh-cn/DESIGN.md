@@ -140,6 +140,20 @@ Claude 判断到了节点
 
 主会话每一步读用量。用量越过提醒起点后，每再涨 `nudgeStepPct` 提醒一次：一行带当前占比的话，附在下一个文本工具结果上，若先来的是 prompt，则附在该 prompt 的上下文里。越过 `urgentPct` 立即升级。有请求排队或正在压缩时、subagent 中、非交互会话中、插件关闭时都不提醒。漏掉提醒可以接受：40% 以上仍有 auto-compact 兜底。
 
+## 自主触发
+
+实测表明，只靠工具描述，压缩从不会被触发：Claude 做完两阶段任务的第一阶段就继续往下走了。用户的要求是再也不用提压缩，所以触发由插件负责，判断仍交给 Claude。三个触发点都受 `autoNodes` 控制，沿用同一道门槛，且在 subagent、非交互会话、请求排队或压缩中、插件关闭时都不触发。
+
+**节点信号。** `detectNode(tool, input, result)` 是纯函数，输入是主会话里一次已完成且无错误的工具调用。强信号：`git push`、PR/MR 创建或合并、`git tag`、写入 `specs/` 或 `plans/` 下的 markdown、写入名为 `HANDOFF*`/`handoff*` 的文件、待办全部完成。弱信号：`git commit`、新建 `.md`、后台 agent 启动。
+
+**回合中标记。** 门槛通过、无排队请求，且信号为强或上下文不低于 `floorPct + 5` 时，在该工具的文本结果上附一行（否则附在下一个 prompt 的上下文里）：点明节点、给出上下文占比，并告诉 Claude 若阶段已收尾且没有在等用户回答，就在本轮结束前调用 `compact_now`。每回合一条。
+
+**回合末自检。** 让整个流程全自动的兜底。主会话 `turn.complete` 时（未中止、交互式、门槛通过、无排队请求），检查本轮是否出现节点信号而没调用 `compact_now`，或上下文已到 `nudgeStartPct` 以上仍未压缩。以 `AskUserQuestion` 或末尾问号结束的回合跳过。每种节点每涨 5 个百分点最多自检一次，两次自检之间没有工具活动则不连续自检。经过常规 1.5 秒防抖并空闲后，插件提交一条 prompt：阶段已收尾就调用 `compact_now`（若之后没有可自动继续的工作，`next` 写怎么处理用户最新一条消息，或一句收尾小结），否则回复「不压」。日志记录 `self-check`，下一个回合再记 `self-check:compacted` 或 `self-check:declined`。`turnEndCheck=false` 只关闭这一项。
+
+**换话题提示。** 人工输入（composer 或 bridge）的 prompt，门槛通过、无排队请求且上下文不低于 `floorPct + 5` 时，给模型加一行：若新需求无关，先调用 `compact_now`，`next` 写这条需求的要点。
+
+每次成功压缩都以续接 prompt 收尾，无论是在阶段结束时请求，还是在对话中途请求，工作总会继续。
+
 ## 数据
 
 `~/.claude/self-compact/<session-id>/handoff-<n>.md` 和 `~/.claude/self-compact/log.jsonl`。mods 不能 import `node:fs`，文件通过引擎的 `$.fs` 读写。数据不离开本机，插件不发起网络请求。

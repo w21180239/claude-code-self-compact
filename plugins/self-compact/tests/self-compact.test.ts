@@ -7,6 +7,7 @@ import {
   configFrom,
   gate,
   nudgeLevel,
+  detectNode,
   realUserMessages,
   renderHandoff,
   TOOL_FULL,
@@ -379,9 +380,9 @@ testZh('stale after 4 tool calls drops request', async ($, on) => {
 // ---- executor and continuation ----
 
 const turnStart = ($: Dollar, turnId: string) => $.turn.start({ text: 'x', turnId } as never)
-const turnComplete = ($: Dollar, turnId: string, isAborted = false) =>
+const turnComplete = ($: Dollar, turnId: string, isAborted = false, answer = '') =>
   $.turn.complete({
-    answer: '',
+    answer: answer,
     durationMs: 1,
     isAborted,
     turnId,
@@ -482,7 +483,7 @@ testZh('executor: gives up and toasts', async ($, on) => {
   await userPrompt($, '继续')
   expect(w.submits.at(-1)?.context?.join(' ')).toContain('busy')
   await userPrompt($, '再来')
-  expect(w.submits.at(-1)?.context).toBeUndefined()
+  expect(w.submits.at(-1)?.context?.join(' ') ?? '').not.toContain('busy')
 })
 
 testZh('executor: a thrown compact error is retried like a skip', async ($, on) => {
@@ -613,7 +614,7 @@ testZh('nudge: rides next text tool result', async ($, on) => {
   expect(await ctxOf($)).toContain('30%')
   // Taken by the tool result, so the prompt carries nothing.
   await userPrompt($, '继续')
-  expect(w.submits.at(-1)?.context).toBeUndefined()
+  expect(w.submits.at(-1)?.context?.join(' ') ?? '').not.toContain('留意下一个节点')
 })
 
 testZh('nudge: falls back to the next prompt context', async ($, on) => {
@@ -866,8 +867,8 @@ testZh('tool description (zh): short, with tiers, nodes, anti-nodes and the end-
   const w = engine(on)
   await start($)
   const d = w.registered[0].description
-  expect(d.length <= 560).toBe(true)
-  for (const s of ['15%', '20%', '30%', '40%', '好节点', '反节点', '不要再调用']) expect(d).toContain(s)
+  expect(d.length <= 640).toBe(true)
+  for (const s of ['15%', '20%', '30%', '40%', '好节点', '反节点', '标出节点', '不要再调用']) expect(d).toContain(s)
 })
 
 test('configFrom: defaults, strings and booleans', () => {
@@ -942,8 +943,8 @@ test('tool description (en): short with tiers, nodes, anti-nodes and end-the-tur
   const w = engine(on)
   await start($)
   const d = w.registered[0].description
-  expect(d.length <= 600).toBe(true)
-  for (const s of ['15%', '20%', '30%', '40%', 'Good nodes', 'Anti-nodes', 'end the turn now', 'call no more tools']) {
+  expect(d.length <= 700).toBe(true)
+  for (const s of ['15%', '20%', '30%', '40%', 'Good nodes', 'Anti-nodes', 'flags nodes', 'end the turn now', 'call no more tools']) {
     expect(d).toContain(s)
   }
   expect(d.replace(/[→·]/g, '')).not.toMatch(NON_ASCII)
@@ -981,4 +982,362 @@ test('configFrom: releaseStopHooks defaults off, accepts true/"true"/"1"', () =>
   expect(configFrom({ releaseStopHooks: 'true' }).releaseStopHooks).toBe(true)
   expect(configFrom({ releaseStopHooks: '1' }).releaseStopHooks).toBe(true)
   expect(configFrom({ releaseStopHooks: false }).releaseStopHooks).toBe(false)
+})
+
+// ---- autonomous triggers ----
+
+test('detectNode: strong and weak signals', () => {
+  const strong = (tool: string, input: unknown, kind: string) =>
+    expect(detectNode(tool, input)).toEqual({ kind, strength: 'strong' })
+  const weak = (tool: string, input: unknown, kind: string, result?: unknown) =>
+    expect(detectNode(tool, input, result)).toEqual({ kind, strength: 'weak' })
+  strong('Bash', { command: 'git push origin main' }, 'push')
+  strong('Bash', { command: 'cd x && git push -u origin feat' }, 'push')
+  strong('Bash', { command: 'gh pr create --fill' }, 'pr')
+  strong('Bash', { command: 'gh pr merge 12' }, 'pr')
+  strong('Bash', { command: 'git tag v1.0.0' }, 'tag')
+  strong('Write', { file_path: '/g/docs/specs/2026-11-12-x-design.md' }, 'spec-plan')
+  strong('Edit', { file_path: '/g/docs/superpowers/plans/p.md' }, 'spec-plan')
+  strong('MultiEdit', { file_path: 'docs/spec/x.md' }, 'spec-plan')
+  strong('Write', { file_path: '/g/HANDOFF.md' }, 'handoff')
+  strong('Write', { file_path: '/g/notes/handoff-2.md' }, 'handoff')
+  strong('TodoWrite', { todos: [{ content: 'a', status: 'completed' }, { content: 'b', status: 'completed' }] }, 'todos-done')
+  weak('Bash', { command: 'git commit -m "x"' }, 'commit')
+  weak('Write', { file_path: '/g/notes/readme.md' }, 'doc-written', 'File created successfully at: /g/notes/readme.md')
+  weak('Agent', { run_in_background: true, prompt: 'p' }, 'delegated')
+  weak('Task', { run_in_background: true }, 'delegated')
+  // A commit that also pushes is the stronger node.
+  strong('Bash', { command: 'git commit -m x && git push' }, 'push')
+  // No signal.
+  expect(detectNode('Bash', { command: 'ls -la' })).toBeUndefined()
+  expect(detectNode('Bash', { command: 'git status' })).toBeUndefined()
+  expect(detectNode('Write', { file_path: '/g/src/a.ts' })).toBeUndefined()
+  expect(detectNode('Write', { file_path: '/g/notes/readme.md' }, 'The file /g/notes/readme.md has been updated')).toBeUndefined()
+  expect(detectNode('Edit', { file_path: '/g/notes/readme.md' })).toBeUndefined()
+  expect(detectNode('TodoWrite', { todos: [{ status: 'completed' }, { status: 'in_progress' }] })).toBeUndefined()
+  expect(detectNode('TodoWrite', { todos: [] })).toBeUndefined()
+  expect(detectNode('Agent', { prompt: 'p' })).toBeUndefined()
+  expect(detectNode('Agent', { run_in_background: false })).toBeUndefined()
+})
+
+test('detectNode: ignores errors and subagents', () => {
+  expect(detectNode('Bash', { command: 'git push' }, { isError: true })).toBeUndefined()
+  expect(detectNode('Bash', { command: 'git push' }, { error: 'rejected' })).toBeUndefined()
+  expect(detectNode('Bash', { command: 'git push' }, { exitCode: 1 })).toBeUndefined()
+  expect(detectNode('Bash', { command: 'git push' }, { result: 'ok' })).toEqual({ kind: 'push', strength: 'strong' })
+})
+
+testZh('detectNode: ignores subagent tool calls in the hook', async ($, on) => {
+  const w = engine(on)
+  await start($)
+  await turnStart($, 't1')
+  const r = (await $.tool.call({ tool: 'Bash', command: 'git push', agentId: 'sub1' } as never)) as Out
+  expect(r.context).toBeUndefined()
+  await turnComplete($, 't1')
+  await w.clock.advance(5_000)
+  expect(w.submits).toEqual([])
+})
+
+const gitPush = ($: Dollar) => $.tool.call({ tool: 'Bash', command: 'git push origin feat' } as never) as Promise<Out>
+const gitTag = ($: Dollar) => $.tool.call({ tool: 'Bash', command: 'git tag v1' } as never) as Promise<Out>
+const gitCommit = ($: Dollar) => $.tool.call({ tool: 'Bash', command: 'git commit -m x' } as never) as Promise<Out>
+
+testZh('node nudge: rides the tool result after git push', async ($, on) => {
+  const w = engine(on)
+  await start($)
+  await turnStart($, 't1')
+  const r = await gitPush($)
+  expect(r.context?.join('\n')).toBe(
+    '[self-compact] 刚才的 git push 像是一个节点（上下文 20%）。如果这一步收尾了当前阶段、没有在等用户回答，就在本轮结束前调用 compact_now；否则忽略这条。',
+  )
+  const row = w.log().find(l => l.result === 'node-nudge')
+  expect(row?.kind).toBe('push')
+  expect(row?.pct).toBe(20)
+  // Delivered with the result, so the prompt carries nothing.
+  await userPrompt($, '继续')
+  expect(w.submits.at(-1)?.context?.join(' ') ?? '').not.toContain('刚才的')
+})
+
+test('node nudge: english text', async ($, on) => {
+  engine(on)
+  await start($)
+  await turnStart($, 't1')
+  const r = await gitPush($)
+  const t = r.context?.join(' ') ?? ''
+  expect(t).toContain('[self-compact]')
+  expect(t).toContain('compact_now')
+  expect(t).toContain('20%')
+  expect(t).not.toMatch(NON_ASCII)
+})
+
+testZh('node nudge: once per turn', async ($, on) => {
+  const w = engine(on)
+  await start($)
+  await turnStart($, 't1')
+  expect((await gitPush($)).context?.join(' ')).toContain('刚才的')
+  expect((await gitTag($)).context).toBeUndefined()
+  expect(w.log().filter(l => l.result === 'node-nudge').length).toBe(1)
+  // A new turn may nudge again.
+  await turnComplete($, 't1')
+  await turnStart($, 't2')
+  expect((await gitTag($)).context?.join(' ')).toContain('刚才的')
+})
+
+testZh('node nudge: silent below the gate', async ($, on) => {
+  const w = engine(on, { tokens: 140_000, window: 1_000_000 })
+  await start($)
+  await turnStart($, 't1')
+  expect((await gitPush($)).context).toBeUndefined()
+  // Gate open but a weak signal needs floor + 5 = 20%.
+  w.usage.tokens = 170_000
+  expect((await gitCommit($)).context).toBeUndefined()
+  // A strong one does not.
+  await turnComplete($, 't1')
+  await turnStart($, 't2')
+  expect((await gitPush($)).context?.join(' ')).toContain('17%')
+  await turnComplete($, 't2')
+  await turnStart($, 't3')
+  w.usage.tokens = 200_000
+  expect((await gitCommit($)).context?.join(' ')).toContain('git commit')
+  expect(w.log().filter(l => l.result === 'node-nudge').length).toBe(2)
+})
+
+testZh('node nudge: silent while a request is queued', async ($, on) => {
+  const w = engine(on)
+  await start($)
+  await turnStart($, 't1')
+  await call($, HANDOFF)
+  expect((await gitPush($)).context).toBeUndefined()
+  expect(w.log().some(l => l.result === 'node-nudge')).toBe(false)
+})
+
+testZh('self-check: submitted after a node turn without compact_now', async ($, on) => {
+  const w = engine(on)
+  await start($)
+  await turnStart($, 't1')
+  await gitPush($)
+  await turnComplete($, 't1')
+  expect(w.submits).toEqual([])
+  await w.clock.advance(1_499)
+  expect(w.submits).toEqual([])
+  await w.clock.advance(1)
+  expect(w.submits.length).toBe(1)
+  expect(w.submits[0].text).toBe(
+    '[self-compact 自检] 上一轮出现了节点信号（push），上下文 20%。如果当前阶段已经收尾、你没有在等用户回答，现在调用 compact_now 写好交接单；' +
+      '如果后面没有要自动继续的工作，next 填「怎么处理用户最新这条消息」，或一句给用户的收尾小结。如果不是好时机，只回复「不压」两个字并结束，不要做别的。',
+  )
+  expect(w.log().some(l => l.result === 'self-check' && l.kind === 'push')).toBe(true)
+})
+
+testZh('self-check: not after a turn that already called compact_now', async ($, on) => {
+  const w = engine(on)
+  await start($)
+  await turnStart($, 't1')
+  await gitPush($)
+  await call($, HANDOFF)
+  await turnComplete($, 't1')
+  await w.clock.advance(1_500)
+  expect(w.submits.length).toBe(1) // the continuation, not a self-check
+  expect(w.submits[0].text).toContain('下一步：实现 Task 1')
+  expect(w.log().some(l => l.result === 'self-check')).toBe(false)
+})
+
+testZh('self-check: logs compacted and declined on the following turn', async ($, on) => {
+  const w = engine(on)
+  await start($)
+  await turnStart($, 't1')
+  await gitPush($)
+  await turnComplete($, 't1')
+  await w.clock.advance(1_500)
+  await turnStart($, 't2')
+  await turnComplete($, 't2', false, '不压')
+  expect(w.log().at(-1)?.result).toBe('self-check:declined')
+  w.usage.tokens = 260_000
+  await turnStart($, 't3')
+  await gitPush($)
+  await turnComplete($, 't3')
+  await w.clock.advance(1_500)
+  await turnStart($, 't4')
+  await call($, HANDOFF)
+  await turnComplete($, 't4')
+  expect(w.log().some(l => l.result === 'self-check:compacted')).toBe(true)
+})
+
+testZh('self-check: long context with no node and no compaction', async ($, on) => {
+  const w = engine(on, { tokens: 310_000, window: 1_000_000 })
+  await start($)
+  await turnStart($, 't1')
+  await bash($)
+  await turnComplete($, 't1')
+  await w.clock.advance(1_500)
+  expect(w.submits.length).toBe(1)
+  expect(w.submits[0].text).toContain('[self-compact 自检]')
+  expect(w.submits[0].text).toContain('31%')
+  // Below nudgeStartPct and no node: nothing.
+  const before = w.submits.length
+  w.usage.tokens = 200_000
+  await turnStart($, 't2')
+  await bash($)
+  await turnComplete($, 't2')
+  await w.clock.advance(5_000)
+  expect(w.submits.length).toBe(before)
+})
+
+testZh('self-check: skipped when the turn ends with a question', async ($, on) => {
+  const w = engine(on)
+  await start($)
+  await turnStart($, 't1')
+  await gitPush($)
+  await turnComplete($, 't1', false, '要不要现在合并？')
+  await w.clock.advance(5_000)
+  expect(w.submits).toEqual([])
+  await turnStart($, 't2')
+  await gitPush($)
+  await turnComplete($, 't2', false, 'Merge it now?')
+  await w.clock.advance(5_000)
+  expect(w.submits).toEqual([])
+  await turnStart($, 't3')
+  await gitPush($)
+  await turnComplete($, 't3', false, '合并了 ')
+  await w.clock.advance(1_500)
+  expect(w.submits.length).toBe(1)
+})
+
+testZh('self-check: skipped after AskUserQuestion', async ($, on) => {
+  const w = engine(on)
+  await start($)
+  await turnStart($, 't1')
+  await gitPush($)
+  await $.tool.call({ tool: 'AskUserQuestion', questions: [] } as never)
+  await turnComplete($, 't1')
+  await w.clock.advance(5_000)
+  expect(w.submits).toEqual([])
+})
+
+testZh('self-check: skipped for an aborted turn and cancelled by a new turn', async ($, on) => {
+  const w = engine(on)
+  await start($)
+  await turnStart($, 't1')
+  await gitPush($)
+  await turnComplete($, 't1', true)
+  await w.clock.advance(5_000)
+  expect(w.submits).toEqual([])
+  // A turn starts within the debounce: the check is cancelled.
+  await turnStart($, 't2')
+  await gitPush($)
+  await turnComplete($, 't2')
+  await w.clock.advance(1_000)
+  await turnStart($, 't3')
+  await w.clock.advance(5_000)
+  expect(w.submits).toEqual([])
+})
+
+testZh('self-check: rate-limited per kind and growth', async ($, on) => {
+  const w = engine(on)
+  await start($)
+  const turn = async (id: string, f: ($: Dollar) => Promise<Out>) => {
+    await turnStart($, id)
+    await f($)
+    await turnComplete($, id)
+    await w.clock.advance(1_500)
+  }
+  await turn('t1', gitPush)
+  expect(w.submits.length).toBe(1)
+  // The check turn itself: Claude declines without tools; no second check follows.
+  await turnStart($, 't2')
+  await turnComplete($, 't2', false, '不压')
+  await w.clock.advance(5_000)
+  expect(w.submits.length).toBe(1)
+  // Same kind, same size: rate-limited.
+  await turn('t3', gitPush)
+  expect(w.submits.length).toBe(1)
+  // Another kind is not.
+  await turn('t4', gitTag)
+  expect(w.submits.length).toBe(2)
+  // Same kind after 5 points of growth.
+  w.usage.tokens = 249_000
+  await turn('t5', gitPush)
+  expect(w.submits.length).toBe(2)
+  w.usage.tokens = 250_000
+  await turn('t6', gitPush)
+  expect(w.submits.length).toBe(3)
+  // Never twice in a row without tool activity.
+  await turnStart($, 't7')
+  await turnComplete($, 't7')
+  await w.clock.advance(5_000)
+  expect(w.submits.length).toBe(3)
+})
+
+test('self-check: disabled by turnEndCheck=false', { options: { language: 'zh', turnEndCheck: false } }, async ($, on) => {
+  const w = engine(on, { tokens: 310_000, window: 1_000_000 })
+  await start($)
+  await turnStart($, 't1')
+  const r = await gitPush($)
+  expect(r.context?.join(' ')).toContain('刚才的') // the nudge still works
+  await turnComplete($, 't1')
+  await w.clock.advance(5_000)
+  expect(w.submits).toEqual([])
+})
+
+testZh('topic switch: hint added above floor+5', async ($, on) => {
+  const w = engine(on, { tokens: 170_000, window: 1_000_000 })
+  await start($)
+  await userPrompt($, '换个需求')
+  expect(w.submits.at(-1)?.context).toBeUndefined()
+  w.usage.tokens = 200_000
+  await userPrompt($, '换个需求')
+  expect(w.submits.at(-1)?.context?.join('\n')).toBe(
+    '[self-compact] 上下文 20%。如果这条新需求和之前的工作无关，先调用 compact_now（next 写这条需求的原文要点）再结束本轮，压缩后会自动继续。',
+  )
+  // Slash commands and non-human prompts get none.
+  await $.prompt.submit({ text: '/help', command: { name: 'help' }, origin: { kind: 'composer' }, wait: false } as never)
+  expect(w.submits.at(-1)?.context).toBeUndefined()
+  await $.prompt.submit({ text: 'bg done', origin: { kind: 'task-notification' }, wait: false } as never)
+  expect(w.submits.at(-1)?.context).toBeUndefined()
+})
+
+testZh('topic switch: none while a request is queued', async ($, on) => {
+  const w = engine(on)
+  await start($)
+  await call($, HANDOFF)
+  await userPrompt($, '换个需求')
+  expect(w.submits.at(-1)?.context).toBeUndefined()
+})
+
+test('autoNodes=false: no node nudge, no self-check, no topic hint', { options: { language: 'zh', autoNodes: false } }, async ($, on) => {
+  const w = engine(on, { tokens: 310_000, window: 1_000_000 })
+  await start($)
+  await turnStart($, 't1')
+  expect((await gitPush($)).context).toBeUndefined()
+  await turnComplete($, 't1')
+  await w.clock.advance(5_000)
+  expect(w.submits).toEqual([])
+  await userPrompt($, '换个需求')
+  expect(w.submits.at(-1)?.context).toBeUndefined()
+  expect(w.log().some(l => l.result === 'node-nudge' || l.result === 'self-check')).toBe(false)
+})
+
+testZh('continuation: always sent after a successful compaction', async ($, on) => {
+  const w = await queued($, on)
+  await w.clock.advance(1_500)
+  expect(w.compactCalls.length).toBe(1)
+  expect(w.submits.length).toBe(1)
+  expect(w.submits[0].text).toContain('下一步：实现 Task 1')
+  expect(w.log().at(-1)?.result).toBe('done')
+})
+
+testZh('continuation: an empty next is refused', async ($, on) => {
+  const w = engine(on)
+  await start($)
+  const r = await call($, { ...HANDOFF, next: '' })
+  expect(r.deny).toContain('next')
+  expect(w.handoffs()).toEqual([])
+})
+
+test('configFrom: autoNodes and turnEndCheck default on, accept booleans and strings', () => {
+  expect(configFrom(undefined).autoNodes).toBe(true)
+  expect(configFrom(undefined).turnEndCheck).toBe(true)
+  expect(configFrom({ autoNodes: false, turnEndCheck: 'false' })).toMatchObject({ autoNodes: false, turnEndCheck: false })
+  expect(configFrom({ autoNodes: '0' }).autoNodes).toBe(false)
+  expect(configFrom({ autoNodes: 'true' }).autoNodes).toBe(true)
 })
