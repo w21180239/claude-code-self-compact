@@ -98,6 +98,16 @@ claude plugin install self-compact@claude-code-self-compact
 
 其中一项由插件自己检查：如果最后一次工具调用是 `AskUserQuestion`，请求会被拒绝。
 
+### 自主触发
+
+只靠工具描述，Claude 不会主动压缩：实测中它做完一个阶段就直接往下走了。因此插件加了三个触发点，用户无需再提压缩：
+
+- **节点标记。** 出现 `git push`、PR/MR 创建或合并、`git tag`、写入 spec/plan/handoff 文件，或待办全部完成时，若门槛已开，就在该工具结果后附一行。较弱的信号（`git commit`、新建 `.md`、后台 agent 启动）要高出下限 5 个百分点才标记。每个回合最多一条。
+- **回合末自检。** 出现过节点标记却没调用 `compact_now`，或上下文越过提醒起点仍未压缩，插件在回合结束后提交一条简短 prompt，Claude 要么调用 `compact_now`，要么回复「不压」。回合以提问结束时跳过；每种节点每涨 5 个百分点最多自检一次；没有新的工具活动不会连续自检。
+- **换话题提示。** 人工输入的 prompt 在高出下限 5 个百分点以上时，给模型加一行：若这条需求与之前的工作无关，先压缩再做。
+
+`autoNodes` 同时关闭这三项；`turnEndCheck` 只关闭回合末自检。压缩之后一律续接：每次成功压缩都会发送续接 prompt。
+
 ## 交接单保留什么
 
 `compact_now` 接收结构化的交接单：`node`、`objective`、`standing_orders`（你的规则和授权，用你的原话）、`decisions`（含原因）、`artifacts`、`pending`（每个在跑的任务及回报方式）、`done`、`next`，以及可选的 `drop`。缺必填字段时调用被拒绝，并指出缺哪一项。
@@ -133,6 +143,8 @@ claude plugin install self-compact@claude-code-self-compact
 | `nudgeStepPct` | 5 | 两次提醒的间隔 |
 | `urgentPct` | 40 | 提醒措辞升级 |
 | `releaseStopHooks` | false | true 时，排队中的压缩可以结束被其他 Stop hook（如 /goal）撑住的回合。仅在个人（非托管）环境有效；其他环境下内置 guard 会跳过用户 mod 的 Stop hook（见 FAQ） |
+| `autoNodes` | true | 自主触发：节点类工具调用（push、PR、spec/plan 落盘、待办全完成）后附一行标记，回合末自检，新需求时的换话题提示。false 同时关闭这三项 |
+| `turnEndCheck` | true | 仅回合末自检（依赖 `autoNodes`）：出现节点或长时间未压缩后，多开一个回合问 Claude 是否压缩 |
 | `enabled` | true | false 时工具仍注册，但所有调用被拒绝，也不提醒 |
 
 环境变量 `DISABLE_COMPACT=1` 同样让所有调用被拒绝。交接单内容（你的常驻规则、决定）保持你使用的语言；`language` 只改变插件自己的文字。

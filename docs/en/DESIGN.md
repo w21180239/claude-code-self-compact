@@ -155,6 +155,20 @@ Post-compact context is carried by the continuation prompt (standing orders and 
 
 Each main-session step reads usage. Once usage passes the nudge start, and then after every further `nudgeStepPct`, one line with the current percentage is attached to the next text tool result, or to the next prompt's context if no text result comes first. Crossing `urgentPct` escalates immediately. Nudges stay silent while a request is queued or compacting, inside subagents, in non-interactive sessions and when the plugin is disabled. A missed nudge is acceptable: auto-compact is still the backstop above 40%.
 
+## Autonomous triggers
+
+A live test showed that the tool description alone never triggers a compaction: Claude finished phase one of a two-phase task and carried on. The user's requirement is that they never mention compaction, so the plugin supplies the trigger and Claude keeps the judgment. All three triggers sit behind `autoNodes`, share the normal gate, and never fire in subagents, non-interactive sessions, while a request is queued or compacting, or when the plugin is disabled.
+
+**Node signals.** `detectNode(tool, input, result)` is a pure function over a finished main-session, non-error tool call. Strong: `git push`, PR/MR create or merge, `git tag`, a write to a `specs/` or `plans/` markdown file or to a file named `HANDOFF*`/`handoff*`, a todo list whose items are all completed. Weak: `git commit`, a new `.md` file, a background agent launch.
+
+**Mid-turn flag.** When the gate passes, nothing is pending, and the signal is strong or the context is at least `floorPct + 5`, one line rides that tool's text result (the next prompt context otherwise). It names the node, states the context percentage and tells Claude to call `compact_now` before the turn ends if the phase is closed and no answer is awaited. One flag per turn.
+
+**Turn-end self-check.** The fallback that makes the loop automatic. On a main `turn.complete` (not aborted, interactive, gate open, nothing pending) the plugin checks for a node signal this turn without a `compact_now` call, or for a context at or above `nudgeStartPct` with no compaction. A turn that ended with `AskUserQuestion` or a trailing `?` is skipped. A check is limited to one per node kind per 5 points of growth and never follows another check without tool activity in between. After the usual 1.5 s debounce and idle, the plugin submits one prompt: call `compact_now` if the phase is closed (`next` then states how to handle the user's latest message, or gives a one-line recap, when nothing continues by itself), otherwise answer "skip". The log records `self-check`, then `self-check:compacted` or `self-check:declined` for the following turn. `turnEndCheck=false` disables only this trigger.
+
+**Topic switch.** On a human prompt (composer or bridge) with the gate open, nothing pending and the context at least `floorPct + 5`, a model-only line suggests calling `compact_now` first when the request is unrelated, with `next` carrying the gist of the new request.
+
+Every successful compaction ends with the continuation prompt, whether it was requested at a phase end or in mid-conversation, so work always resumes.
+
 ## Data
 
 `~/.claude/self-compact/<session-id>/handoff-<n>.md` and `~/.claude/self-compact/log.jsonl`. Mods cannot import `node:fs`, so files go through the engine's `$.fs`. Nothing leaves the machine and the plugin makes no network calls.
