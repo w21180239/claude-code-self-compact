@@ -29,7 +29,7 @@ CI runs the same three commands on Ubuntu and macOS. Run them before every commi
 - **No `node:fs` in mods.** The mod runtime cannot import it. File access goes through the engine's `$.fs`; environment through `$.env`.
 - **No network calls, no external dependencies, no state outside `~/.claude/self-compact/`.** The README promises this; a change that breaks it needs a README and SECURITY.md update in the same PR.
 - **Clean-room.** Other compaction plugins inform the design (see Acknowledgements in `docs/en/DESIGN.md`). Do not copy their code or prompts.
-- **English for code, comments, commit messages and PR text.** Comments are terse: the why, not a restatement of the code. User-facing strings emitted by the plugin (toast, continuation prompt, tool description) are currently Chinese; keep that consistent within a release.
+- **English for code, comments, commit messages and PR text.** Comments are terse: the why, not a restatement of the code. User-facing strings (tool description, denials, toasts, nudges, continuation prompt) live in the `STRINGS` table in `register.ts`, one entry per language (`en`, `zh`); a new or changed string needs both.
 - **Tests with behavior changes.** Every gate, queue or race change gets a test in `plugins/self-compact/tests/`. Flip the assertion once and confirm the test fails, then restore it.
 - **Docs stay in sync.** The tier table, the break-even table and the configuration table appear in `README.md`, `README.zh-cn.md` and `docs/`. Change them together.
 - **Versioning.** `version` in `plugins/self-compact/.claude-plugin/plugin.json` must equal the release tag without the `v`; the release workflow checks it.

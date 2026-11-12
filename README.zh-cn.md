@@ -126,6 +126,7 @@ claude plugin install self-compact@claude-code-self-compact
 
 | 选项 | 默认 | 含义 |
 | --- | --- | --- |
+| `language` | en | `en` 或 `zh`：工具描述、拒绝信息、toast、提醒和续接消息的语言；其他值回退为 `en` |
 | `floorPct` | 15 | 硬下限，窗口百分比 |
 | `maxPostRatio` | 0.55 | 预计压后大小与当前大小之比的上限 |
 | `nudgeStartPct` | 30 | 开始提醒（高于下限时取下限） |
@@ -133,7 +134,7 @@ claude plugin install self-compact@claude-code-self-compact
 | `urgentPct` | 40 | 提醒措辞升级 |
 | `enabled` | true | false 时工具仍注册，但所有调用被拒绝，也不提醒 |
 
-环境变量 `DISABLE_COMPACT=1` 同样让所有调用被拒绝。
+环境变量 `DISABLE_COMPACT=1` 同样让所有调用被拒绝。交接单内容（你的常驻规则、决定）保持你使用的语言；`language` 只改变插件自己的文字。
 
 ## 数据与隐私
 
@@ -152,7 +153,6 @@ claude plugin install self-compact@claude-code-self-compact
 - 没有输入检测。mods 看不到你的草稿或按键，所以插件只在没有轮次运行时执行，轮次结束后再等 1.5 秒，续接消息也等空闲后才发。压缩仍可能落在你正要打字的时候。
 - 其他插件的 Stop hook 可能先运行。`/goal` 这类会阻止结束的 Stop hook 会让本轮一直开着；插件会让本轮结束以便执行排队的压缩，一次强制结束失败后就不再强制。
 - 压缩用原生 summarizer，耗时 30-55 秒。
-- 工具描述、toast 和续接消息目前是中文写的。不论你用什么语言，Claude 都能按它们执行；交接单和你的常驻规则保持你使用的语言。
 
 ## 对比
 

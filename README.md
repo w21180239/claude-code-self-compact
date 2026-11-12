@@ -65,7 +65,7 @@ After that there is nothing to run. Claude decides when to call the tool.
 
 Two layers. The plugin enforces a floor. Claude decides everything above it, guided by the tool description and by nudges.
 
-The plugin refuses a call unless both hold: tokens are at least `floorPct` of the window, and the estimated post-compact size (session baseline + 20k) is at most `maxPostRatio` of the current size. The baseline is the first main-session request's context size (65k when unknown).
+The plugin refuses a call unless both hold: tokens are at least `floorPct` of the window, and the estimated post-compact size (session baseline + 20k) is at most `maxPostRatio` of the current size. The baseline is the context size of the session's first main request, read only when the conversation has at most 3 messages (65k otherwise, for example on a resumed session).
 
 | Context | Behavior |
 | --- | --- |
@@ -126,6 +126,7 @@ Set the options through the plugin settings (`userConfig` in `plugin.json`), for
 
 | Option | Default | Meaning |
 | --- | --- | --- |
+| `language` | en | `en` or `zh`: language of the tool description, denials, toasts, nudges and continuation prompt; any other value falls back to `en` |
 | `floorPct` | 15 | hard floor, percent of the window |
 | `maxPostRatio` | 0.55 | estimated post-compact size over current size |
 | `nudgeStartPct` | 30 | first nudge (raised to the floor when higher) |
@@ -133,14 +134,14 @@ Set the options through the plugin settings (`userConfig` in `plugin.json`), for
 | `urgentPct` | 40 | escalated nudge wording |
 | `enabled` | true | false: the tool stays registered, every call is denied, no nudges |
 
-`DISABLE_COMPACT=1` in the environment also denies every call.
+`DISABLE_COMPACT=1` in the environment also denies every call. Handoff content (your standing orders, decisions) stays in whatever language you used; `language` only changes the plugin's own text.
 
 ## Data and privacy
 
 Everything lives under `~/.claude/self-compact/`, never inside a repository:
 
 - `<session-id>/handoff-<n>.md`: the rendered handoff plus your last 5 real messages.
-- `log.jsonl`: one JSON line per request with `ts`, `session`, `node`, `pct` (usage at request), `result` (`queued`, `denied:<why>`, `done`, `preempted`, `aborted`, `stale`, `failed`, `error`), an optional `reason`, `beforePct`, `afterPct` and `durationMs`.
+- `log.jsonl` (rotated to `log.1.jsonl` at about 2 MB; an unreadable log is left untouched, never overwritten): one JSON line per request with `ts`, `session`, `node`, `pct` (usage at request), `result` (`queued`, `denied:<why>`, `done`, `preempted`, `aborted`, `stale`, `failed`, `error`), an optional `reason`, `beforePct`, `afterPct` and `durationMs`.
 
 Nothing leaves your machine. The plugin makes no network calls and has no dependencies. The compaction itself is Claude Code's own `$.session.compact`, so the summary is produced by the same model and account as the rest of your session. Handoff files contain your own words from the conversation; delete the folder whenever you like.
 
@@ -152,7 +153,6 @@ Nothing leaves your machine. The plugin makes no network calls and has no depend
 - No typing detection. Mods cannot see your draft or keystrokes, so the plugin runs only when no turn is active, waits 1.5 s after the turn ends, and the continuation prompt waits for idle. A compaction can still land while you are about to type.
 - Other plugins' Stop hooks may run first. A blocking Stop hook such as `/goal` keeps the turn open; the plugin ends the turn so the queued compaction can run, and stops forcing after one failed attempt.
 - Compaction uses the native summarizer and takes 30-55 seconds.
-- The tool description, toast and continuation prompt are written in Chinese. Claude follows them regardless of your language; the handoff and your standing orders stay in whatever language you used.
 
 ## How it compares
 

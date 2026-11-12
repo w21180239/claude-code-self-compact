@@ -4,6 +4,7 @@ import {
   DEFAULTS,
   buildInstructions,
   continuationText,
+  configFrom,
   gate,
   nudgeLevel,
   realUserMessages,
@@ -102,7 +103,7 @@ test('realUserMessages: filters reminders and notifications, keeps last 5', () =
 
 test('renderHandoff: quotes user messages verbatim', () => {
   const msg = '第一行\n第二行 `code` ```fence```\n  缩进保留'
-  const md = renderHandoff(HANDOFF, [msg, '另一条'])
+  const md = renderHandoff(HANDOFF, [msg, '另一条'], 'zh')
   expect(md).toContain(msg)
   expect(md).toContain('另一条')
   expect(md).toContain('## 用户最近原话')
@@ -137,13 +138,13 @@ test('continuationText: no next → fallback sentence', () => {
     handoffPath: '/x/h.md',
     standing_orders: ['不要 push'],
     pending: ['等 MR'],
-  })
+  }, 'zh')
   expect(t).toContain('已压缩，按用户最新指令继续')
   expect(t).toContain('31% → 9%')
   expect(t).toContain('/x/h.md')
   expect(t).toContain('不要 push')
   expect(t).toContain('等 MR')
-  const t2 = continuationText({ node: 'N', beforePct: 31, handoffPath: '/x/h.md', next: '做 X', standing_orders: [], pending: [] })
+  const t2 = continuationText({ node: 'N', beforePct: 31, handoffPath: '/x/h.md', next: '做 X', standing_orders: [], pending: [] }, 'zh')
   expect(t2).toContain('做 X')
   expect(t2).not.toContain('已压缩，按用户最新指令继续')
 })
@@ -151,6 +152,8 @@ test('continuationText: no next → fallback sentence', () => {
 // ---- compact_now tool and queue ----
 // The module under test is loaded fresh by the harness, so its state is read through
 // effects (files, status line, tool results), never through an imported binding.
+
+const testZh = (name: string, body: TestBody) => test(name, { options: { language: 'zh' } }, body)
 
 type On = Parameters<TestBody>[1]
 type Dollar = Parameters<TestBody>[0]
@@ -181,28 +184,35 @@ function engine(
     files.set(e.path, e.text)
     return { value: undefined }
   })
-  on('fs.read', (_, e) => (files.has(e.path) ? { value: files.get(e.path) as string } : { deny: 'ENOENT' }))
+  const fsFlags = { failRead: false }
+  on('fs.read', (_, e) => {
+    if (fsFlags.failRead) return { deny: 'EIO' }
+    return files.has(e.path) ? { value: files.get(e.path) as string } : { deny: 'ENOENT' }
+  })
+  on('fs.exists', (_, e) => ({ value: files.has(e.path) }))
   on('ui.status', (_, e) => {
     statuses.push(e.text)
     return { value: undefined }
   })
+  on('session.end', (_, e) => ({ sessionId: e.sessionId }))
   on('turn.start', (_, e) => ({ turnId: e.turnId }))
   on('turn.complete', () => ({ text: '' }))
   on('tool.call', () => ({ result: 'ok' }))
   // Scripted outcomes of session.compact, one per call; the last one repeats.
-  const compactPlan: ('ok' | 'busy' | 'throw')[] = ['ok']
+  const compactPlan: ('ok' | 'busy' | 'throw' | 'abort')[] = ['ok']
   const compactCalls: string[] = []
   const toasts: string[] = []
   const submits: { text: string; context?: readonly string[] }[] = []
-  const wait = { compactMs: 0, afterTokens: 80_000 }
+  const wait = { compactMs: 0, afterTokens: 80_000, reportAfter: undefined as number | undefined }
   on('session.compact', async (_, e) => {
     compactCalls.push(e.instructions ?? '')
     const step = compactPlan.length > 1 ? (compactPlan.shift() as string) : compactPlan[0]
     if (wait.compactMs > 0) await clock.sleep(wait.compactMs)
     if (step === 'throw') throw new Error('turn running')
+    if (step === 'abort') return { skip: 'compaction aborted by user' }
     if (step === 'busy') return { skip: 'busy' }
     usage.tokens = wait.afterTokens
-    return { messages: [{ role: 'user', text: 'summary', toolUses: [] }] }
+    return { messages: [{ role: 'user', text: 'summary', toolUses: [] }], tokensAfter: wait.reportAfter }
   })
   // What each model request reports as its context size, and what the user's Stop hooks answer.
   const step = { total: 65_000, index: 0 }
@@ -233,7 +243,7 @@ function engine(
       .split('\n')
       .filter(Boolean)
       .map(l => JSON.parse(l) as { result: string; session: string; node?: string; pct?: number; reason?: string; beforePct?: number; afterPct?: number; durationMs?: number })
-  return { clock, files, registered, statuses, handoffs, log, usage, compactPlan, compactCalls, toasts, submits, wait, step, stopAnswer }
+  return { clock, files, registered, statuses, handoffs, log, usage, compactPlan, compactCalls, toasts, submits, wait, step, stopAnswer, fsFlags }
 }
 
 const start = ($: Dollar, isInteractive = true) =>
@@ -246,7 +256,7 @@ const call = ($: Dollar, input: Record<string, unknown>, extra: Record<string, u
 
 const bash = ($: Dollar) => $.tool.call({ tool: 'Bash', command: 'ls' } as never) as Promise<Out>
 
-test('tool: registered undeferred on start', async ($, on) => {
+testZh('tool: registered undeferred on start', async ($, on) => {
   const w = engine(on)
   await start($)
   expect(w.registered.length).toBe(1)
@@ -255,7 +265,7 @@ test('tool: registered undeferred on start', async ($, on) => {
   expect(w.registered[0].description.length > 100).toBe(true)
 })
 
-test('tool: subagent call denied', async ($, on) => {
+testZh('tool: subagent call denied', async ($, on) => {
   const w = engine(on)
   await start($)
   const r = await call($, HANDOFF, { agentId: 'sub1' })
@@ -264,7 +274,7 @@ test('tool: subagent call denied', async ($, on) => {
   expect(w.log().at(-1)?.result).toBe('denied:subagent')
 })
 
-test('tool: non-interactive denied', async ($, on) => {
+testZh('tool: non-interactive denied', async ($, on) => {
   const w = engine(on)
   await start($, false)
   const r = await call($, HANDOFF)
@@ -272,7 +282,7 @@ test('tool: non-interactive denied', async ($, on) => {
   expect(w.handoffs()).toEqual([])
 })
 
-test('tool: below floor denied with pct', async ($, on) => {
+testZh('tool: below floor denied with pct', async ($, on) => {
   const w = engine(on, { tokens: 140_000, window: 1_000_000 })
   await start($)
   const r = await call($, HANDOFF)
@@ -283,14 +293,14 @@ test('tool: below floor denied with pct', async ($, on) => {
   expect(w.log().at(-1)?.result).toBe('denied:gate')
 })
 
-test('tool: missing usage denies without throwing', async ($, on) => {
+testZh('tool: missing usage denies without throwing', async ($, on) => {
   engine(on, {})
   await start($)
   const r = await call($, HANDOFF)
   expect(r.deny).toContain('不可用')
 })
 
-test('tool: missing fields denied', async ($, on) => {
+testZh('tool: missing fields denied', async ($, on) => {
   const w = engine(on)
   await start($)
   const { next: _n, objective: _o, ...rest } = HANDOFF
@@ -300,7 +310,7 @@ test('tool: missing fields denied', async ($, on) => {
   expect(w.handoffs()).toEqual([])
 })
 
-test('tool: after AskUserQuestion denied', async ($, on) => {
+testZh('tool: after AskUserQuestion denied', async ($, on) => {
   const w = engine(on)
   await start($)
   await $.tool.call({ tool: 'AskUserQuestion', questions: [] } as never)
@@ -312,14 +322,14 @@ test('tool: after AskUserQuestion denied', async ($, on) => {
   expect((await call($, HANDOFF)).deny).toBeUndefined()
 })
 
-test('tool: disabled by DISABLE_COMPACT', async ($, on) => {
+testZh('tool: disabled by DISABLE_COMPACT', async ($, on) => {
   engine(on, undefined, { DISABLE_COMPACT: '1' })
   await start($)
   const r = await call($, HANDOFF)
   expect(r.deny).toContain('禁用')
 })
 
-test('tool: valid call queues and writes handoff', async ($, on) => {
+testZh('tool: valid call queues and writes handoff', async ($, on) => {
   const w = engine(on)
   await start($)
   const r = await call($, HANDOFF)
@@ -336,7 +346,7 @@ test('tool: valid call queues and writes handoff', async ($, on) => {
   expect(last?.pct).toBe(20)
 })
 
-test('second call replaces queued', async ($, on) => {
+testZh('second call replaces queued', async ($, on) => {
   const w = engine(on)
   await start($)
   await call($, HANDOFF)
@@ -352,7 +362,7 @@ test('second call replaces queued', async ($, on) => {
   expect(w.log().filter(l => l.result === 'stale').length).toBe(1)
 })
 
-test('stale after 4 tool calls drops request', async ($, on) => {
+testZh('stale after 4 tool calls drops request', async ($, on) => {
   const w = engine(on)
   await start($)
   await call($, HANDOFF)
@@ -390,7 +400,7 @@ async function queued($: Dollar, on: On, usage?: { tokens?: number; window?: num
   return w
 }
 
-test('executor: compacts after turn and submits continuation with next', async ($, on) => {
+testZh('executor: compacts after turn and submits continuation with next', async ($, on) => {
   const w = await queued($, on)
   expect(w.compactCalls.length).toBe(0)
   await w.clock.advance(1_499)
@@ -414,7 +424,7 @@ test('executor: compacts after turn and submits continuation with next', async (
   expect(w.compactCalls.length).toBe(1)
 })
 
-test('executor: not during a running turn', async ($, on) => {
+testZh('executor: not during a running turn', async ($, on) => {
   const w = await queued($, on)
   await w.clock.advance(1_000)
   await turnStart($, 't2')
@@ -425,7 +435,7 @@ test('executor: not during a running turn', async ($, on) => {
   expect(w.compactCalls.length).toBe(1)
 })
 
-test('executor: retries 5 times then waits for next turn', async ($, on) => {
+testZh('executor: retries 5 times then waits for next turn', async ($, on) => {
   const w = await queued($, on)
   w.compactPlan.splice(0, 1, 'busy')
   await w.clock.advance(1_500)
@@ -449,7 +459,7 @@ test('executor: retries 5 times then waits for next turn', async ($, on) => {
   expect(w.toasts).toEqual(['压缩 20% → 8%'])
 })
 
-test('executor: gives up and toasts', async ($, on) => {
+testZh('executor: gives up and toasts', async ($, on) => {
   const w = await queued($, on)
   w.compactPlan.splice(0, 1, 'busy')
   await w.clock.advance(1_500 + 5 * 2_000)
@@ -475,7 +485,7 @@ test('executor: gives up and toasts', async ($, on) => {
   expect(w.submits.at(-1)?.context).toBeUndefined()
 })
 
-test('executor: a thrown compact error is retried like a skip', async ($, on) => {
+testZh('executor: a thrown compact error is retried like a skip', async ($, on) => {
   const w = await queued($, on)
   w.compactPlan.splice(0, 1, 'throw', 'ok')
   await w.clock.advance(1_500)
@@ -487,7 +497,7 @@ test('executor: a thrown compact error is retried like a skip', async ($, on) =>
   expect(w.log().at(-1)?.result).toBe('done')
 })
 
-test('auto-compact preempts', async ($, on) => {
+testZh('auto-compact preempts', async ($, on) => {
   const w = await queued($, on)
   w.usage.tokens = 90_000 // auto-compact ran between the request and the executor
   await w.clock.advance(1_500)
@@ -499,7 +509,7 @@ test('auto-compact preempts', async ($, on) => {
   expect(w.log().at(-1)?.result).toBe('preempted')
 })
 
-test('new user turn drops next', async ($, on) => {
+testZh('new user turn drops next', async ($, on) => {
   const w = await queued($, on)
   await userPrompt($, '换个方向：先看 CI')
   await turnStart($, 't2')
@@ -513,7 +523,7 @@ test('new user turn drops next', async ($, on) => {
   expect(cont).toContain('不要 push')
 })
 
-test('aborted turn drops request', async ($, on) => {
+testZh('aborted turn drops request', async ($, on) => {
   const w = engine(on)
   await start($)
   await turnStart($, 't1')
@@ -526,7 +536,7 @@ test('aborted turn drops request', async ($, on) => {
   expect(w.log().at(-1)?.result).toBe('aborted')
 })
 
-test('log line written on done', async ($, on) => {
+testZh('log line written on done', async ($, on) => {
   const w = await queued($, on)
   w.wait.compactMs = 40_000
   await w.clock.advance(1_500)
@@ -560,7 +570,7 @@ const ctxOf = async ($: Dollar) => ((await bash($)).context ?? []).join(' ')
 
 const stop = ($: Dollar) => $.classic.Stop({ stop_hook_active: false } as never)
 
-test('nudge: none below 30%', async ($, on) => {
+testZh('nudge: none below 30%', async ($, on) => {
   const w = engine(on)
   await start($)
   await modelStep($, w, 65_000)
@@ -568,7 +578,7 @@ test('nudge: none below 30%', async ($, on) => {
   expect(await ctxOf($)).toBe('')
 })
 
-test('nudge: soft at 30 then every 5', async ($, on) => {
+testZh('nudge: soft at 30 then every 5', async ($, on) => {
   const w = engine(on)
   await start($)
   await modelStep($, w, 65_000)
@@ -584,7 +594,7 @@ test('nudge: soft at 30 then every 5', async ($, on) => {
   expect(await ctxOf($)).toBe('') // delivered once
 })
 
-test('nudge: urgent at 40', async ($, on) => {
+testZh('nudge: urgent at 40', async ($, on) => {
   const w = engine(on)
   await start($)
   await modelStep($, w, 65_000)
@@ -594,7 +604,7 @@ test('nudge: urgent at 40', async ($, on) => {
   expect(note).toContain('下一个安全步骤')
 })
 
-test('nudge: rides next text tool result', async ($, on) => {
+testZh('nudge: rides next text tool result', async ($, on) => {
   const w = engine(on)
   await start($)
   await modelStep($, w, 65_000)
@@ -606,7 +616,7 @@ test('nudge: rides next text tool result', async ($, on) => {
   expect(w.submits.at(-1)?.context).toBeUndefined()
 })
 
-test('nudge: falls back to the next prompt context', async ($, on) => {
+testZh('nudge: falls back to the next prompt context', async ($, on) => {
   const w = engine(on)
   await start($)
   await modelStep($, w, 65_000)
@@ -616,7 +626,7 @@ test('nudge: falls back to the next prompt context', async ($, on) => {
   expect(await ctxOf($)).toBe('')
 })
 
-test('nudge: silent while queued', async ($, on) => {
+testZh('nudge: silent while queued', async ($, on) => {
   const w = engine(on)
   await start($)
   await modelStep($, w, 65_000)
@@ -625,7 +635,7 @@ test('nudge: silent while queued', async ($, on) => {
   expect(await ctxOf($)).toBe('')
 })
 
-test('nudge: silent when disabled by DISABLE_COMPACT', async ($, on) => {
+testZh('nudge: silent when disabled by DISABLE_COMPACT', async ($, on) => {
   const w = engine(on, undefined, { DISABLE_COMPACT: '1' })
   await start($)
   await modelStep($, w, 65_000)
@@ -633,7 +643,7 @@ test('nudge: silent when disabled by DISABLE_COMPACT', async ($, on) => {
   expect(await ctxOf($)).toBe('') // disabled by DISABLE_COMPACT
 })
 
-test('nudge: silent for subagent steps', async ($, on) => {
+testZh('nudge: silent for subagent steps', async ($, on) => {
   const w = engine(on)
   await start($)
   await modelStep($, w, 65_000)
@@ -641,7 +651,7 @@ test('nudge: silent for subagent steps', async ($, on) => {
   expect(await ctxOf($)).toBe('')
 })
 
-test('nudge: silent when non-interactive', async ($, on) => {
+testZh('nudge: silent when non-interactive', async ($, on) => {
   const w = engine(on)
   await start($, false)
   await modelStep($, w, 65_000)
@@ -649,7 +659,7 @@ test('nudge: silent when non-interactive', async ($, on) => {
   expect(await ctxOf($)).toBe('')
 })
 
-test('nudge: counts afresh after a compaction', async ($, on) => {
+testZh('nudge: counts afresh after a compaction', async ($, on) => {
   const w = engine(on)
   await start($)
   await modelStep($, w, 65_000)
@@ -665,7 +675,7 @@ test('nudge: counts afresh after a compaction', async ($, on) => {
   expect(await ctxOf($)).toContain('30%')
 })
 
-test('baseline: first main step sets the floor', async ($, on) => {
+testZh('baseline: first main step sets the floor', async ($, on) => {
   // A 120k baseline needs (120k + 20k) / 0.55 = 255k before compact_now is accepted.
   const w = engine(on, { tokens: 240_000, window: 1_000_000 })
   await start($)
@@ -675,7 +685,7 @@ test('baseline: first main step sets the floor', async ($, on) => {
   expect((await call($, HANDOFF)).deny).toBeUndefined()
 })
 
-test('stop: queued compaction ends a blocked turn', async ($, on) => {
+testZh('stop: queued compaction ends a blocked turn', async ($, on) => {
   const w = engine(on)
   await start($)
   w.stopAnswer.block = '继续完成 goal'
@@ -692,7 +702,7 @@ test('stop: queued compaction ends a blocked turn', async ($, on) => {
   expect((await stop($)).preventContinuation).toBeUndefined()
 })
 
-test('stop: no forcing loop after a failed forced end', async ($, on) => {
+testZh('stop: no forcing loop after a failed forced end', async ($, on) => {
   const w = engine(on)
   await start($)
   w.stopAnswer.block = '继续完成 goal'
@@ -710,4 +720,247 @@ test('stop: no forcing loop after a failed forced end', async ($, on) => {
   await turnComplete($, 't2')
   await turnStart($, 't3')
   expect((await stop($)).preventContinuation).toBe(true)
+})
+
+// ---- review fixes ----
+
+const sessionEnd = ($: Dollar, reason = 'clear') =>
+  $.session.end({ reason, sessionId: 'sess1', resume: { id: 'sess1' } } as never)
+
+testZh('session.end (/clear): a queued request and its timer do not leak into the next session', async ($, on) => {
+  const w = await queued($, on)
+  await sessionEnd($)
+  expect(w.statuses.at(-1)).toBeUndefined()
+  await w.clock.advance(30_000)
+  expect(w.compactCalls.length).toBe(0)
+  expect(w.submits).toEqual([])
+  // A turn end in the new session does not revive the old request.
+  await turnStart($, 't2')
+  await turnComplete($, 't2')
+  await w.clock.advance(30_000)
+  expect(w.compactCalls.length).toBe(0)
+})
+
+testZh('session.end (/clear): nudge counters, notes and baseline start afresh', async ($, on) => {
+  const w = engine(on)
+  await start($)
+  await modelStep($, w, 65_000)
+  await modelStep($, w, 300_000)
+  expect(await ctxOf($)).toContain('30%')
+  await sessionEnd($)
+  // Same 30% again in the new session nudges again, and a 120k first step is the new baseline.
+  await modelStep($, w, 120_000)
+  w.usage.tokens = 240_000
+  expect((await call($, HANDOFF)).deny).toContain('24%')
+  await modelStep($, w, 300_000)
+  expect(await ctxOf($)).toContain('30%')
+})
+
+testZh('baseline: a resumed transcript (many messages) does not become the baseline', async ($, on) => {
+  const w = engine(on, { tokens: 160_000, window: 1_000_000 })
+  await start($)
+  w.step.total = 400_000
+  const stream = $.turn.step({ turnId: 't1', index: 0, model: 'm', messageCount: 80 } as never)
+  for await (const _chunk of stream) {
+    // drain
+  }
+  await stream.result
+  // With the 65k default the gate opens at 160k; a 400k baseline would have kept it shut.
+  expect((await call($, HANDOFF)).deny).toBeUndefined()
+})
+
+testZh('nudge: counts afresh after an auto-compact or /compact the plugin did not run', async ($, on) => {
+  const w = engine(on)
+  await start($)
+  await modelStep($, w, 65_000)
+  await modelStep($, w, 300_000)
+  expect(await ctxOf($)).toContain('30%')
+  await modelStep($, w, 90_000) // context shrank: someone compacted
+  expect(await ctxOf($)).toBe('')
+  await modelStep($, w, 300_000)
+  expect(await ctxOf($)).toContain('30%')
+})
+
+testZh('nudge: a stale pre-queue nudge is not delivered after the compaction', async ($, on) => {
+  const w = engine(on)
+  await start($)
+  await modelStep($, w, 65_000)
+  await modelStep($, w, 300_000) // nudge waits for a carrier
+  w.usage.tokens = 300_000
+  await turnStart($, 't1')
+  await call($, HANDOFF)
+  await turnComplete($, 't1')
+  await w.clock.advance(1_500)
+  expect(w.compactCalls.length).toBe(1)
+  expect(await ctxOf($)).toBe('')
+})
+
+testZh('log: concurrent writers keep every line', async ($, on) => {
+  const w = engine(on)
+  await start($)
+  await Promise.all([call($, HANDOFF, { agentId: 'a' }), call($, HANDOFF, { agentId: 'b' }), call($, HANDOFF, { agentId: 'c' })])
+  expect(w.log().length).toBe(3)
+})
+
+testZh('log: an unreadable existing log is never overwritten', async ($, on) => {
+  const w = engine(on)
+  await start($)
+  w.files.set(`${ROOT}/log.jsonl`, 'KEEP\n')
+  w.fsFlags.failRead = true
+  await call($, HANDOFF, { agentId: 'a' })
+  expect(w.files.get(`${ROOT}/log.jsonl`)).toBe('KEEP\n')
+})
+
+testZh('files: empty HOME falls back to USERPROFILE', async ($, on) => {
+  const w = engine(on, undefined, { HOME: '', USERPROFILE: '/win/u' })
+  await start($)
+  await call($, HANDOFF)
+  expect(w.handoffs()).toEqual(['/win/u/.claude/self-compact/sess1/handoff-1.md'])
+})
+
+testZh('executor: user Esc during compaction abandons the request without a continuation', async ($, on) => {
+  const w = await queued($, on)
+  w.compactPlan.splice(0, 1, 'abort')
+  await w.clock.advance(1_500)
+  expect(w.compactCalls.length).toBe(1)
+  await w.clock.advance(60_000)
+  expect(w.compactCalls.length).toBe(1)
+  expect(w.submits).toEqual([])
+  expect(w.statuses.at(-1)).toBeUndefined()
+  expect(w.log().at(-1)?.result).toBe('aborted')
+  await turnStart($, 't2')
+  await turnComplete($, 't2')
+  await w.clock.advance(10_000)
+  expect(w.compactCalls.length).toBe(1)
+})
+
+testZh('stop: a subagent Stop is never forced', async ($, on) => {
+  const w = engine(on)
+  await start($)
+  w.stopAnswer.block = '继续'
+  await call($, HANDOFF)
+  const r = await $.classic.Stop({ stop_hook_active: false, agent_id: 'sub1' } as never)
+  expect(r.preventContinuation).toBeUndefined()
+})
+
+testZh('executor: after-compact size comes from the compaction result when present', async ($, on) => {
+  const w = await queued($, on)
+  w.wait.reportAfter = 70_000
+  w.wait.afterTokens = 200_000 // the usage reading still stale
+  await w.clock.advance(1_500)
+  expect(w.toasts).toEqual(['压缩 20% → 7%'])
+  expect(w.submits[0].text).toContain('20% → 7%')
+})
+
+test('realUserMessages: skips our continuation and the compact summary', () => {
+  const msgs = [
+    { role: 'user', text: '真实消息' },
+    { role: 'user', text: '节点「plan」已压缩（上下文 20% → 8%）。交接单：/x' },
+    { role: 'user', text: '[self-compact] Node "plan" compacted (context 20% → 8%). Handoff: /x' },
+    { role: 'user', text: 'This session is being continued from a previous conversation...' },
+  ]
+  expect(realUserMessages(msgs)).toEqual(['真实消息'])
+})
+
+testZh('tool description (zh): short, with tiers, nodes, anti-nodes and the end-the-turn instruction', async ($, on) => {
+  const w = engine(on)
+  await start($)
+  const d = w.registered[0].description
+  expect(d.length <= 560).toBe(true)
+  for (const s of ['15%', '20%', '30%', '40%', '好节点', '反节点', '不要再调用']) expect(d).toContain(s)
+})
+
+test('configFrom: defaults, strings and booleans', () => {
+  expect(configFrom(undefined)).toEqual(DEFAULTS)
+  const c = configFrom({ floorPct: '20', maxPostRatio: 0.4, nudgeStartPct: '', enabled: 'false' })
+  expect(c.floorPct).toBe(20)
+  expect(c.maxPostRatio).toBe(0.4)
+  expect(c.nudgeStartPct).toBe(30)
+  expect(c.enabled).toBe(false)
+  expect(configFrom({ enabled: false }).enabled).toBe(false)
+  expect(configFrom({ enabled: true }).enabled).toBe(true)
+})
+
+// ---- i18n ----
+
+const NON_ASCII = /[^\x00-\x7F]/
+
+test('configFrom: language accepts zh, anything else is en', () => {
+  expect(configFrom(undefined).language).toBe('en')
+  expect(configFrom({ language: 'zh' }).language).toBe('zh')
+  expect(configFrom({ language: 'fr' }).language).toBe('en')
+  expect(configFrom({ language: 5 }).language).toBe('en')
+})
+
+test('i18n: default language is English for deny, toast and continuation', async ($, on) => {
+  const w = engine(on, { tokens: 140_000, window: 1_000_000 })
+  await start($)
+  const denied = await call($, HANDOFF)
+  expect(denied.deny).toContain('14%')
+  expect(NON_ASCII.test(denied.deny ?? '')).toBe(false)
+  expect((await call($, HANDOFF, { agentId: 's' })).deny).toContain('main session')
+  w.usage.tokens = 200_000
+  await turnStart($, 't1')
+  const queuedRes = await call($, HANDOFF)
+  expect(String(queuedRes.result)).toContain('Queued')
+  expect(String(queuedRes.result)).toContain('call no more tools')
+  expect(w.statuses.at(-1)).toBe('compact queued · plan 已落盘 → 开始实现')
+  await turnComplete($, 't1')
+  await w.clock.advance(1_500)
+  expect(w.toasts).toEqual(['compacted 20% → 8%'])
+  expect(w.submits.length).toBe(1)
+  expect(w.submits[0].text).toContain('20% → 8%')
+  expect(w.submits[0].text).toContain('Next step: 实现 Task 1')
+  expect(w.submits[0].text).toContain('Standing orders (user\'s words)')
+  expect(w.compactCalls[0]).toContain('## Standing orders (user\'s words)')
+  expect(w.files.get(`${ROOT}/sess1/handoff-1.md`)).toContain('## Next step')
+})
+
+test('i18n: zh config keeps Chinese strings', { options: { language: 'zh' } }, async ($, on) => {
+  const w = engine(on, { tokens: 140_000, window: 1_000_000 })
+  await start($)
+  expect((await call($, HANDOFF)).deny).toContain('低于压缩门槛')
+  w.usage.tokens = 200_000
+  await turnStart($, 't1')
+  expect(String((await call($, HANDOFF)).result)).toContain('已排队')
+  await turnComplete($, 't1')
+  await w.clock.advance(1_500)
+  expect(w.toasts).toEqual(['压缩 20% → 8%'])
+  expect(w.submits[0].text).toContain('下一步：实现 Task 1')
+  expect(w.registered[0].description).toContain('好节点')
+})
+
+test('i18n: unknown language falls back to English', { options: { language: 'fr' } }, async ($, on) => {
+  const w = engine(on, { tokens: 140_000, window: 1_000_000 })
+  await start($)
+  const r = await call($, HANDOFF)
+  expect(r.deny).toContain('below the compaction threshold')
+  expect(w.registered[0].description).toContain('Good nodes')
+})
+
+test('tool description (en): short with tiers, nodes, anti-nodes and end-the-turn', async ($, on) => {
+  const w = engine(on)
+  await start($)
+  const d = w.registered[0].description
+  expect(d.length <= 600).toBe(true)
+  for (const s of ['15%', '20%', '30%', '40%', 'Good nodes', 'Anti-nodes', 'end the turn now', 'call no more tools']) {
+    expect(d).toContain(s)
+  }
+  expect(d.replace(/[→·]/g, '')).not.toMatch(NON_ASCII)
+})
+test('i18n: en nudges and stale note are English', async ($, on) => {
+  const w = engine(on)
+  await start($)
+  await modelStep($, w, 65_000)
+  await modelStep($, w, 300_000)
+  const soft = await ctxOf($)
+  expect(soft).toContain('[self-compact] Context 30%')
+  expect(soft).not.toMatch(NON_ASCII)
+  await modelStep($, w, 410_000)
+  expect(await ctxOf($)).toContain('next safe step')
+  await call($, HANDOFF)
+  for (let i = 0; i < 3; i++) await bash($)
+  const stale = (await bash($)).context?.join(' ') ?? ''
+  expect(stale).toContain('expired')
+  expect(stale).not.toMatch(NON_ASCII)
 })

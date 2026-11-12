@@ -55,12 +55,14 @@ stateDiagram-v2
 
 One request is kept per session. A new `compact_now` replaces the queued one.
 
+All per-conversation state (queue, baseline, counters, pending notes) is reset at `session.start` and again at `session.end`, because `/clear`, `/resume` and `/branch` fire no `session.start`.
+
 ## Gate
 
 The plugin refuses the call unless both conditions hold:
 
 1. `tokens >= floorPct% x window`
-2. `(baseline + 20k) / tokens <= maxPostRatio`, where `baseline` is the context size of the session's first main request (65k when unknown) and 20k is the allowance for the summary and re-injected files.
+2. `(baseline + 20k) / tokens <= maxPostRatio`, where `baseline` is the context size of the session's first main request, taken only when the conversation has at most 3 messages so a resumed session does not inflate it (65k when unknown) and 20k is the allowance for the summary and re-injected files.
 
 Both reduce to one threshold: `need = max(floorPct x window, (baseline + 20k) / maxPostRatio)`.
 
@@ -129,7 +131,7 @@ Instructions are capped at 8,000 characters. Trimming order: `done`, then the ol
 | --- | --- |
 | The user types a new prompt while a request is queued | Compaction still runs after that turn. `next` is dropped and the continuation says only that the context was compacted. |
 | Auto-compact ran first | The request is dropped, the continuation is still sent. |
-| Esc on the turn | The request is dropped, no continuation. |
+| Esc on the turn, or during the compaction | The request is dropped, no continuation. Esc during the compaction is recognised by its abort, interrupt or cancel error text. |
 | More than 3 other tool calls after queueing | The handoff is stale: dropped, and Claude is told to call again with current state. |
 | A blocking Stop hook such as `/goal` keeps the turn open | The plugin ends the turn so the queued compaction can run. After one failed forced end it stops forcing until a natural turn end. |
 | The compact call is skipped or throws | Retry every 2 s up to 5 times, once more at the next main turn end, then give up with a toast and a note delivered to Claude on its next tool result or prompt. |
@@ -157,7 +159,13 @@ Each main-session step reads usage. Once usage passes the nudge start, and then 
 
 `~/.claude/self-compact/<session-id>/handoff-<n>.md` and `~/.claude/self-compact/log.jsonl`. Mods cannot import `node:fs`, so files go through the engine's `$.fs`. Nothing leaves the machine and the plugin makes no network calls.
 
+Past about 2 MB, `log.jsonl` is moved to `log.1.jsonl` and a new file starts. A log that cannot be read is left untouched rather than overwritten.
+
 `log.jsonl` has one JSON line per request: `ts`, `session`, `node`, `pct` (usage at request), `result` (`queued`, `denied:<why>`, `done`, `preempted`, `aborted`, `stale`, `failed`, `error`), an optional `reason`, `beforePct`, `afterPct` and `durationMs`.
+
+## Language
+
+Everything the user or the model reads comes from one table in `register.ts`, keyed by the `language` option: `en` (default) or `zh`; any other value is `en`. That covers the tool description and its field descriptions, denial reasons, the scheduled result, the stale note, nudges, status line, toasts, failure note, the compact-instruction preamble, the handoff section headings and the continuation prompt. User-supplied handoff content is never translated.
 
 ## Acknowledgements
 

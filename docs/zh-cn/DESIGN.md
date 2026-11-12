@@ -47,7 +47,7 @@ Claude 判断到了节点
 两个条件同时满足插件才放行：
 
 1. `tokens >= floorPct% x window`
-2. `(baseline + 20k) / tokens <= maxPostRatio`。`baseline` 是本会话首个主轮请求的上下文大小（拿不到时 65k），20k 是摘要和重新注入文件的余量。
+2. `(baseline + 20k) / tokens <= maxPostRatio`。`baseline` 是本会话首个主轮请求的上下文大小，仅当对话不超过 3 条消息时采用，避免恢复的会话把它撑大（拿不到时 65k），20k 是摘要和重新注入文件的余量。
 
 两者合成一个阈值：`need = max(floorPct x window, (baseline + 20k) / maxPostRatio)`。
 
@@ -116,7 +116,7 @@ Claude 判断到了节点
 | --- | --- |
 | 排队后用户发了新消息 | 压缩仍在该轮结束后执行。丢弃 `next`，续接消息只说明已压缩。 |
 | auto-compact 抢先 | 丢弃请求，仍发续接消息。 |
-| 本轮按了 Esc | 丢弃请求，不发续接消息。 |
+| 本轮或压缩过程中按了 Esc | 丢弃请求，不发续接消息。压缩中的 Esc 靠 abort、interrupt、cancel 这类错误文本识别。 |
 | 排队后又调了超过 3 次其他工具 | 交接单过期：丢弃，并告知 Claude 用最新状态重新调用。 |
 | `/goal` 这类 Stop hook 让本轮一直开着 | 插件让本轮结束以便执行排队的压缩；一次强制结束失败后停止强制，直到自然结束。 |
 | 压缩被跳过或抛错 | 每 2 秒重试，最多 5 次，下一个主轮结束再试一次，仍失败则放弃，弹 toast，并在 Claude 的下一个工具结果或 prompt 里附上说明。 |
@@ -144,7 +144,13 @@ Claude 判断到了节点
 
 `~/.claude/self-compact/<session-id>/handoff-<n>.md` 和 `~/.claude/self-compact/log.jsonl`。mods 不能 import `node:fs`，文件通过引擎的 `$.fs` 读写。数据不离开本机，插件不发起网络请求。
 
+超过约 2 MB 时，`log.jsonl` 会移到 `log.1.jsonl`，另起新文件；读不出来的日志原样保留，不会被覆盖。
+
 `log.jsonl` 每次请求一行 JSON：`ts`、`session`、`node`、`pct`（请求时占比）、`result`（`queued`、`denied:<原因>`、`done`、`preempted`、`aborted`、`stale`、`failed`、`error`）、可选的 `reason`、`beforePct`、`afterPct`、`durationMs`。
+
+## 语言
+
+用户和模型会读到的所有文字都来自 `register.ts` 里的一张表，由 `language` 选项选择：`en`（默认）或 `zh`，其他值按 `en` 处理。范围包括工具描述及字段说明、拒绝原因、排队结果、过期提示、提醒、状态栏、toast、失败说明、压缩指令前言、交接单小节标题和续接消息。用户提供的交接单内容不翻译。
 
 ## 致谢
 
