@@ -118,7 +118,7 @@ Claude 判断到了节点
 | auto-compact 抢先 | 丢弃请求，仍发续接消息。 |
 | 本轮或压缩过程中按了 Esc | 丢弃请求，不发续接消息。压缩中的 Esc 靠 abort、interrupt、cancel 这类错误文本识别。 |
 | 排队后又调了超过 3 次其他工具 | 交接单过期：丢弃，并告知 Claude 用最新状态重新调用。 |
-| `/goal` 这类 Stop hook 让本轮一直开着 | 插件让本轮结束以便执行排队的压缩；一次强制结束失败后停止强制，直到自然结束。 |
+| `/goal` 这类 Stop hook 让本轮一直开着 | 插件让本轮结束以便执行排队的压缩；一次强制结束失败后停止强制，直到自然结束。 默认关闭该释放，因为 Team/Enterprise 登录和托管机器上 Claude Code 内置 guard（`cc-plugin-sec-default`）会跳过用户 mod 的 Stop hook；`releaseStopHooks` 仅在个人环境有效。 || 压缩被跳过或抛错 | 每 2 秒重试，最多 5 次，下一个主轮结束再试一次，仍失败则放弃，弹 toast，并在 Claude 的下一个工具结果或 prompt 里附上说明。 |
 | 压缩被跳过或抛错 | 每 2 秒重试，最多 5 次，下一个主轮结束再试一次，仍失败则放弃，弹 toast，并在 Claude 的下一个工具结果或 prompt 里附上说明。 |
 | subagent、`-p`、SDK、定时任务 | 拒绝，不提醒。 |
 

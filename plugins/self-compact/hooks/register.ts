@@ -18,7 +18,7 @@ export const DEFAULTS: Config = {
   nudgeStepPct: 5,
   urgentPct: 40,
   enabled: true,
-  releaseStopHooks: true,
+  releaseStopHooks: false,
   language: 'en',
 }
 
@@ -288,7 +288,7 @@ export function configFrom(options: Record<string, unknown> | undefined): Config
     nudgeStepPct: num(o.nudgeStepPct, DEFAULTS.nudgeStepPct),
     urgentPct: num(o.urgentPct, DEFAULTS.urgentPct),
     enabled: en === undefined ? true : !(en === false || en === 'false' || en === '0'),
-    releaseStopHooks: rs === undefined ? true : !(rs === false || rs === 'false' || rs === '0'),
+    releaseStopHooks: rs === true || rs === 'true' || rs === '1',
     language: o.language === 'zh' ? 'zh' : 'en',
   }
 }

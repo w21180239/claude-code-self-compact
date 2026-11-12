@@ -133,7 +133,7 @@ Instructions are capped at 8,000 characters. Trimming order: `done`, then the ol
 | Auto-compact ran first | The request is dropped, the continuation is still sent. |
 | Esc on the turn, or during the compaction | The request is dropped, no continuation. Esc during the compaction is recognised by its abort, interrupt or cancel error text. |
 | More than 3 other tool calls after queueing | The handoff is stale: dropped, and Claude is told to call again with current state. |
-| A blocking Stop hook such as `/goal` keeps the turn open | The plugin ends the turn so the queued compaction can run. After one failed forced end it stops forcing until a natural turn end. |
+| A blocking Stop hook such as `/goal` keeps the turn open | The plugin ends the turn so the queued compaction can run. After one failed forced end it stops forcing until a natural turn end. Releasing is off by default because Claude Code's built-in guard (`cc-plugin-sec-default`) skips user mods' Stop hooks on Team/Enterprise logins and managed machines; `releaseStopHooks` helps only on personal setups. |
 | The compact call is skipped or throws | Retry every 2 s up to 5 times, once more at the next main turn end, then give up with a toast and a note delivered to Claude on its next tool result or prompt. |
 | Subagent, `-p`, SDK or cron session | Denied, no nudges. |
 

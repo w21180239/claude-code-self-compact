@@ -132,7 +132,7 @@ claude plugin install self-compact@claude-code-self-compact
 | `nudgeStartPct` | 30 | 开始提醒（高于下限时取下限） |
 | `nudgeStepPct` | 5 | 两次提醒的间隔 |
 | `urgentPct` | 40 | 提醒措辞升级 |
-| `releaseStopHooks` | true | true 时，排队中的压缩可以结束被其他 Stop hook（如 /goal）撑住的回合。若 Claude Code 提示本 hook 被跳过，设为 false |
+| `releaseStopHooks` | false | true 时，排队中的压缩可以结束被其他 Stop hook（如 /goal）撑住的回合。仅在个人（非托管）环境有效；其他环境下内置 guard 会跳过用户 mod 的 Stop hook（见 FAQ） |
 | `enabled` | true | false 时工具仍注册，但所有调用被拒绝，也不提醒 |
 
 环境变量 `DISABLE_COMPACT=1` 同样让所有调用被拒绝。交接单内容（你的常驻规则、决定）保持你使用的语言；`language` 只改变插件自己的文字。
@@ -152,7 +152,7 @@ claude plugin install self-compact@claude-code-self-compact
 - 只管主会话。subagent 调用会被拒绝；让 subagent 保持短小，超了就拆。
 - 只在交互会话中可用。`claude -p`、SDK、定时任务会被拒绝，也不会收到提醒。
 - 没有输入检测。mods 看不到你的草稿或按键，所以插件只在没有轮次运行时执行，轮次结束后再等 1.5 秒，续接消息也等空闲后才发。压缩仍可能落在你正要打字的时候。
-- 其他插件的 Stop hook 可能先运行。`/goal` 这类会阻止结束的 Stop hook 会让本轮一直开着；插件会让本轮结束以便执行排队的压缩，一次强制结束失败后就不再强制。
+- `/goal` 这类 Stop hook 可能让排队的压缩等到下一个自然回合结束，除非开启 `releaseStopHooks`（仅个人环境）。
 - 压缩用原生 summarizer，耗时 30-55 秒。
 
 ## 对比
@@ -186,7 +186,7 @@ jq -c 'select(.result == "done")' ~/.claude/self-compact/log.jsonl
 
 对照 `beforePct` 和 `afterPct` 与[成本模型](#成本模型)，可以判断你的下限设得是否合适。
 
-**每个回合结束都提示 "self-compact: its classic.Stop hook was skipped"。** 另一个插件的 Stop hook 先运行，并把事件越过了本插件。把 `releaseStopHooks` 设为 false；代价只是排队中的压缩不再能结束被 Stop hook（如 /goal）撑住的回合。
+**每个回合结束都提示 "self-compact: its classic.Stop hook was skipped"。** 在加载 Claude Code 内置 guard `sec-default@builtin`（显示为 `cc-plugin-sec-default`）的环境中，用户 mod 注册在 `classic.<Event>` 上的 hook 不会运行，Claude Code 每个回合结束都会警告。任何 Team/Enterprise `/login` 会话以及带托管设置的机器都会加载该 guard，用户无法关闭（[管理员文档](https://code.claude.com/docs/en/plugins/mods/admin.md)）。因此 `releaseStopHooks` 默认关闭；该选项只在个人（非托管）环境有效，保持关闭即可消除警告。
 
 **我想关掉它。** 把 `enabled` 设为 false，或 `export DISABLE_COMPACT=1`。auto-compact 和 `/compact` 不受影响。
 
