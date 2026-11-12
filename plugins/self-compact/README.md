@@ -25,6 +25,7 @@ Set through the plugin settings (`userConfig`), for example `claude plugin confi
 | `nudgeStartPct` | 30 | first nudge (raised to the floor when higher) |
 | `nudgeStepPct` | 5 | gap between nudges |
 | `urgentPct` | 40 | escalated nudge wording |
+| `releaseStopHooks` | true | true: a queued compaction ends a turn that another Stop hook (such as /goal) holds open. Set false if Claude Code warns that this hook was skipped |
 | `enabled` | true | false: the tool stays registered, every call is denied, no nudges |
 
 `DISABLE_COMPACT=1` in the environment also denies every call.

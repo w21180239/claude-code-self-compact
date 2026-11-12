@@ -964,3 +964,21 @@ test('i18n: en nudges and stale note are English', async ($, on) => {
   expect(stale).toContain('expired')
   expect(stale).not.toMatch(NON_ASCII)
 })
+
+test('stop: releaseStopHooks=false registers no Stop release', { options: { language: 'zh', releaseStopHooks: false } }, async ($, on) => {
+  const w = engine(on)
+  await start($)
+  w.stopAnswer.block = '继续完成 goal'
+  await call($, HANDOFF)
+  const r = await stop($)
+  expect(r.block).toBe('继续完成 goal')
+  expect(r.preventContinuation).toBeUndefined()
+})
+
+test('configFrom: releaseStopHooks defaults on, accepts false/"false"/"0"', () => {
+  expect(configFrom(undefined).releaseStopHooks).toBe(true)
+  expect(configFrom({ releaseStopHooks: false }).releaseStopHooks).toBe(false)
+  expect(configFrom({ releaseStopHooks: 'false' }).releaseStopHooks).toBe(false)
+  expect(configFrom({ releaseStopHooks: '0' }).releaseStopHooks).toBe(false)
+  expect(configFrom({ releaseStopHooks: true }).releaseStopHooks).toBe(true)
+})
