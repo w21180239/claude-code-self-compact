@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.2 - 2026-11-12
+
+- Changed: `releaseStopHooks` defaults to off. Where Claude Code's built-in guard (`cc-plugin-sec-default`) loads (Team/Enterprise logins, machines with managed settings), user mods' `classic.Stop` hooks never run and Claude Code warned at every turn end. The option still works on personal setups.
+
 ## 0.1.1 - 2026-11-12
 
 - Added: `releaseStopHooks` option (default true). Set false to skip the `classic.Stop` release when another plugin's Stop hook runs first and Claude Code warns that this hook was skipped.

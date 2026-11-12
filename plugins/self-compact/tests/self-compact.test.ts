@@ -685,7 +685,7 @@ testZh('baseline: first main step sets the floor', async ($, on) => {
   expect((await call($, HANDOFF)).deny).toBeUndefined()
 })
 
-testZh('stop: queued compaction ends a blocked turn', async ($, on) => {
+test('stop: queued compaction ends a blocked turn', { options: { language: 'zh', releaseStopHooks: true } }, async ($, on) => {
   const w = engine(on)
   await start($)
   w.stopAnswer.block = '继续完成 goal'
@@ -702,7 +702,7 @@ testZh('stop: queued compaction ends a blocked turn', async ($, on) => {
   expect((await stop($)).preventContinuation).toBeUndefined()
 })
 
-testZh('stop: no forcing loop after a failed forced end', async ($, on) => {
+test('stop: no forcing loop after a failed forced end', { options: { language: 'zh', releaseStopHooks: true } }, async ($, on) => {
   const w = engine(on)
   await start($)
   w.stopAnswer.block = '继续完成 goal'
@@ -834,7 +834,7 @@ testZh('executor: user Esc during compaction abandons the request without a cont
   expect(w.compactCalls.length).toBe(1)
 })
 
-testZh('stop: a subagent Stop is never forced', async ($, on) => {
+test('stop: a subagent Stop is never forced', { options: { language: 'zh', releaseStopHooks: true } }, async ($, on) => {
   const w = engine(on)
   await start($)
   w.stopAnswer.block = '继续'
@@ -975,10 +975,10 @@ test('stop: releaseStopHooks=false registers no Stop release', { options: { lang
   expect(r.preventContinuation).toBeUndefined()
 })
 
-test('configFrom: releaseStopHooks defaults on, accepts false/"false"/"0"', () => {
-  expect(configFrom(undefined).releaseStopHooks).toBe(true)
-  expect(configFrom({ releaseStopHooks: false }).releaseStopHooks).toBe(false)
-  expect(configFrom({ releaseStopHooks: 'false' }).releaseStopHooks).toBe(false)
-  expect(configFrom({ releaseStopHooks: '0' }).releaseStopHooks).toBe(false)
+test('configFrom: releaseStopHooks defaults off, accepts true/"true"/"1"', () => {
+  expect(configFrom(undefined).releaseStopHooks).toBe(false)
   expect(configFrom({ releaseStopHooks: true }).releaseStopHooks).toBe(true)
+  expect(configFrom({ releaseStopHooks: 'true' }).releaseStopHooks).toBe(true)
+  expect(configFrom({ releaseStopHooks: '1' }).releaseStopHooks).toBe(true)
+  expect(configFrom({ releaseStopHooks: false }).releaseStopHooks).toBe(false)
 })

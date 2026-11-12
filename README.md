@@ -132,7 +132,7 @@ Set the options through the plugin settings (`userConfig` in `plugin.json`), for
 | `nudgeStartPct` | 30 | first nudge (raised to the floor when higher) |
 | `nudgeStepPct` | 5 | gap between nudges |
 | `urgentPct` | 40 | escalated nudge wording |
-| `releaseStopHooks` | true | true: a queued compaction ends a turn that another Stop hook (such as /goal) holds open. Set false if Claude Code warns that this hook was skipped |
+| `releaseStopHooks` | false | true: a queued compaction ends a turn that another Stop hook (such as /goal) holds open. Only works on personal (non-managed) setups; the built-in guard skips user mods' Stop hooks elsewhere (see FAQ) |
 | `enabled` | true | false: the tool stays registered, every call is denied, no nudges |
 
 `DISABLE_COMPACT=1` in the environment also denies every call. Handoff content (your standing orders, decisions) stays in whatever language you used; `language` only changes the plugin's own text.
@@ -152,7 +152,7 @@ Nothing leaves your machine. The plugin makes no network calls and has no depend
 - Main session only. Subagents are denied; keep them short and split them when they grow.
 - Interactive sessions only. `claude -p`, SDK and cron sessions are denied and get no nudges.
 - No typing detection. Mods cannot see your draft or keystrokes, so the plugin runs only when no turn is active, waits 1.5 s after the turn ends, and the continuation prompt waits for idle. A compaction can still land while you are about to type.
-- Other plugins' Stop hooks may run first. A blocking Stop hook such as `/goal` keeps the turn open; the plugin ends the turn so the queued compaction can run, and stops forcing after one failed attempt.
+- `/goal`-style Stop hooks can hold a queued compaction until the next natural turn end unless `releaseStopHooks` is on (personal setups only).
 - Compaction uses the native summarizer and takes 30-55 seconds.
 
 ## How it compares
@@ -186,7 +186,7 @@ jq -c 'select(.result == "done")' ~/.claude/self-compact/log.jsonl
 
 Compare `beforePct` and `afterPct` with the [cost model](#cost-model) to see whether your floor is right.
 
-**Every turn ends with "self-compact: its classic.Stop hook was skipped".** Another plugin's Stop hook runs first and sends the event on past ours. Set `releaseStopHooks` to false; the only loss is that a queued compaction no longer ends a turn that a Stop hook (such as /goal) holds open.
+**Every turn ends with "self-compact: its classic.Stop hook was skipped".** Where Claude Code's built-in guard `sec-default@builtin` (shown as `cc-plugin-sec-default`) loads, hooks a user's mod registers on `classic.<Event>` never run, and Claude Code warns at each turn end. The guard loads on any Team/Enterprise `/login` session and on machines with managed settings, and users cannot turn it off ([admin docs](https://code.claude.com/docs/en/plugins/mods/admin.md)). `releaseStopHooks` is off by default for this reason; the option only helps on personal (non-managed) setups, and leaving it off removes the warning.
 
 **I want it off.** Set `enabled` to false, or export `DISABLE_COMPACT=1`. Auto-compact and `/compact` are unaffected.
 
