@@ -1,6 +1,6 @@
 {
   "name": "self-compact",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Claude Code plugin that lets Claude compact its own context at task milestones: agent-initiated /compact with self-written handoff instructions, gated by context size, then auto-continue. Smarter auto-compact for long sessions. English and Chinese UI.",
   "author": { "name": "w21180239" },
   "license": "MIT",
@@ -48,6 +48,12 @@
       "type": "boolean",
       "title": "Enabled",
       "description": "When off, every compact_now call is denied and no nudges are sent",
+      "default": true
+    },
+    "releaseStopHooks": {
+      "type": "boolean",
+      "title": "Release Stop hooks",
+      "description": "Let a queued compaction end a turn that another Stop hook (such as /goal) holds open. Turn off if another plugin's Stop hook runs first and Claude Code warns that this hook was skipped.",
       "default": true
     }
   }

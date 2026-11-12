@@ -132,6 +132,7 @@ Set the options through the plugin settings (`userConfig` in `plugin.json`), for
 | `nudgeStartPct` | 30 | first nudge (raised to the floor when higher) |
 | `nudgeStepPct` | 5 | gap between nudges |
 | `urgentPct` | 40 | escalated nudge wording |
+| `releaseStopHooks` | true | true: a queued compaction ends a turn that another Stop hook (such as /goal) holds open. Set false if Claude Code warns that this hook was skipped |
 | `enabled` | true | false: the tool stays registered, every call is denied, no nudges |
 
 `DISABLE_COMPACT=1` in the environment also denies every call. Handoff content (your standing orders, decisions) stays in whatever language you used; `language` only changes the plugin's own text.
@@ -184,6 +185,8 @@ jq -c 'select(.result == "done")' ~/.claude/self-compact/log.jsonl
 ```
 
 Compare `beforePct` and `afterPct` with the [cost model](#cost-model) to see whether your floor is right.
+
+**Every turn ends with "self-compact: its classic.Stop hook was skipped".** Another plugin's Stop hook runs first and sends the event on past ours. Set `releaseStopHooks` to false; the only loss is that a queued compaction no longer ends a turn that a Stop hook (such as /goal) holds open.
 
 **I want it off.** Set `enabled` to false, or export `DISABLE_COMPACT=1`. Auto-compact and `/compact` are unaffected.
 

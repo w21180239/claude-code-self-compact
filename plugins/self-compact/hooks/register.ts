@@ -7,6 +7,7 @@ export type Config = {
   nudgeStepPct: number
   urgentPct: number
   enabled: boolean
+  releaseStopHooks: boolean
   language: Lang
 }
 
@@ -17,6 +18,7 @@ export const DEFAULTS: Config = {
   nudgeStepPct: 5,
   urgentPct: 40,
   enabled: true,
+  releaseStopHooks: true,
   language: 'en',
 }
 
@@ -278,6 +280,7 @@ const num = (v: unknown, d: number): number => {
 export function configFrom(options: Record<string, unknown> | undefined): Config {
   const o = options ?? {}
   const en = o.enabled
+  const rs = o.releaseStopHooks
   return {
     floorPct: num(o.floorPct, DEFAULTS.floorPct),
     maxPostRatio: num(o.maxPostRatio, DEFAULTS.maxPostRatio),
@@ -285,6 +288,7 @@ export function configFrom(options: Record<string, unknown> | undefined): Config
     nudgeStepPct: num(o.nudgeStepPct, DEFAULTS.nudgeStepPct),
     urgentPct: num(o.urgentPct, DEFAULTS.urgentPct),
     enabled: en === undefined ? true : !(en === false || en === 'false' || en === '0'),
+    releaseStopHooks: rs === undefined ? true : !(rs === false || rs === 'false' || rs === '0'),
     language: o.language === 'zh' ? 'zh' : 'en',
   }
 }
@@ -864,11 +868,13 @@ export const register: Register = (on, options) => {
   })
 
   // A blocking Stop hook (such as /goal) would keep the turn alive and the queued compaction waiting forever.
-  on('classic.Stop', async (_$, e, next) => {
-    const r = await next(e)
-    if ((e as { agent_id?: string }).agent_id !== undefined) return r
-    if (r.block === undefined || state.pending === undefined || state.forceFailed) return r
-    state.forcing = true
-    return { ...r, preventContinuation: true, stopReason: S().stopReason }
-  })
+  if (state.cfg.releaseStopHooks) {
+    on('classic.Stop', async (_$, e, next) => {
+      const r = await next(e)
+      if ((e as { agent_id?: string }).agent_id !== undefined) return r
+      if (r.block === undefined || state.pending === undefined || state.forceFailed) return r
+      state.forcing = true
+      return { ...r, preventContinuation: true, stopReason: S().stopReason }
+    })
+  }
 }

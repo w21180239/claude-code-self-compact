@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.1 - 2026-11-12
+
+- Added: `releaseStopHooks` option (default true). Set false to skip the `classic.Stop` release when another plugin's Stop hook runs first and Claude Code warns that this hook was skipped.
+- Verified: first interactive end-to-end run, queue -> compact 9.5% -> 1.7% in 17 s -> continuation -> next phase.
+
 ## 0.1.0 - 2026-11-12
 
 First public release.

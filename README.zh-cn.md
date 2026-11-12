@@ -132,6 +132,7 @@ claude plugin install self-compact@claude-code-self-compact
 | `nudgeStartPct` | 30 | 开始提醒（高于下限时取下限） |
 | `nudgeStepPct` | 5 | 两次提醒的间隔 |
 | `urgentPct` | 40 | 提醒措辞升级 |
+| `releaseStopHooks` | true | true 时，排队中的压缩可以结束被其他 Stop hook（如 /goal）撑住的回合。若 Claude Code 提示本 hook 被跳过，设为 false |
 | `enabled` | true | false 时工具仍注册，但所有调用被拒绝，也不提醒 |
 
 环境变量 `DISABLE_COMPACT=1` 同样让所有调用被拒绝。交接单内容（你的常驻规则、决定）保持你使用的语言；`language` 只改变插件自己的文字。
@@ -184,6 +185,8 @@ jq -c 'select(.result == "done")' ~/.claude/self-compact/log.jsonl
 ```
 
 对照 `beforePct` 和 `afterPct` 与[成本模型](#成本模型)，可以判断你的下限设得是否合适。
+
+**每个回合结束都提示 "self-compact: its classic.Stop hook was skipped"。** 另一个插件的 Stop hook 先运行，并把事件越过了本插件。把 `releaseStopHooks` 设为 false；代价只是排队中的压缩不再能结束被 Stop hook（如 /goal）撑住的回合。
 
 **我想关掉它。** 把 `enabled` 设为 false，或 `export DISABLE_COMPACT=1`。auto-compact 和 `/compact` 不受影响。
 
