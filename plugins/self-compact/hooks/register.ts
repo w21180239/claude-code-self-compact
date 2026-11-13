@@ -75,6 +75,8 @@ type Strings = {
   hDone: string
   hNext: string
   hDropped: string
+  hLessons: string
+  hIntent: string
   hRecent: string
   contMarker: string
   contHead: (node: string, before: number, after: string, path: string) => string
@@ -84,6 +86,7 @@ type Strings = {
   contStanding: string
   contPending: string
   contClosing: string
+  contRecall: (sessionId: string) => string
   description: (cfg: Config) => string
   node: string
   objective: string
@@ -94,6 +97,7 @@ type Strings = {
   done: string
   next: string
   drop: string
+  lessons: string
 }
 
 // The strings the user or the model reads. Add a language here and to `Lang`; configFrom accepts only the keys of this table.
@@ -158,7 +162,9 @@ export const STRINGS: Record<Lang, Strings> = {
     stopReason: 'compact queued: ending this turn so it can run, then work continues automatically.',
     preamble:
       'This compaction was started by the model at a task node. Write the summary from the handoff below: ' +
-      'keep "Standing orders" verbatim, never paraphrase; list every "Pending" item with how it reports back; end the summary with "Next step".',
+      'keep "Standing orders" verbatim, never paraphrase; list every "Pending" item with how it reports back; end the summary with "Next step". ' +
+      'Copy exactly, never paraphrase: file paths with line numbers, function signatures and load-bearing code lines, error strings, numbers and IDs, the original request and how the goal changed since. ' +
+      'Drop: logs whose result is already stated, repeated reads of the same file, the step-by-step path to a conclusion, and dead ends (keep the lesson of each in one line).',
     tail: path => `Full handoff written to: ${path} (readable after compaction)`,
     none: '(none)',
     hTitle: node => `# Node handoff: ${node}`,
@@ -170,6 +176,8 @@ export const STRINGS: Record<Lang, Strings> = {
     hDone: 'Done',
     hNext: 'Next step',
     hDropped: 'Dropped threads',
+    hLessons: 'Lessons from dead ends',
+    hIntent: 'Original request',
     hRecent: 'Recent user messages',
     contMarker: '[self-compact] Node "',
     contHead: (node, before, after, path) => `[self-compact] Node "${node}" compacted (context ${before}% → ${after}). Handoff: ${path}`,
@@ -179,6 +187,8 @@ export const STRINGS: Record<Lang, Strings> = {
     contStanding: "Standing orders (user's words):",
     contPending: 'Pending:',
     contClosing: 'Continue with the next step; reread the handoff for details.',
+    contRecall: sid =>
+      `The summary drops detail. When you need an exact error string, value, path or command from before compaction, grep the transcript ~/.claude/projects/*/${sid}.jsonl instead of guessing or redoing the work.`,
     description: cfg => `Compact your own context at a task node. The call queues: the plugin compacts after the turn ends, then resumes you at \`next\`.
 
 Tiers (enforced): <${cfg.floorPct}% denied; ${cfg.floorPct}-${cfg.floorPct + NODE_MARGIN_PCT}% only at a big phase handoff; >=${cfg.floorPct + NODE_MARGIN_PCT}% any clean node. Nudged at >=${Math.max(cfg.nudgeStartPct, cfg.floorPct)}%, urgent at >=${cfg.urgentPct}%.
@@ -198,6 +208,7 @@ After "Queued", end the turn now: one line, call no more tools.
     done: 'What is done, briefly',
     next: 'The first concrete action after compaction',
     drop: 'Threads explicitly dropped (optional)',
+    lessons: 'What failed and why, one line each, so it is not retried (optional)',
   },
   zh: {
     gateNoUsage: '上下文用量暂不可用（首次请求之前），稍后再试。',
@@ -257,7 +268,9 @@ After "Queued", end the turn now: one line, call no more tools.
     stopReason: 'compact 已排队：先结束本轮以执行压缩，随后自动续接。',
     preamble:
       '这是模型在任务节点上主动发起的压缩，请按下面的交接单写摘要：' +
-      '「常驻指令」逐字保留，不要转述；「待处理」每一项都要列出，写明各自如何回报；摘要以「下一步」收尾。',
+      '「常驻指令」逐字保留，不要转述；「待处理」每一项都要列出，写明各自如何回报；摘要以「下一步」收尾。' +
+      '以下内容原样照抄、不要转述：带行号的文件路径、函数签名和关键代码行、报错原文、数值和 ID、用户最初的需求及之后目标的变化。' +
+      '可以丢掉：结论已写明的日志、同一文件的重复读取、得出结论的逐步过程、走不通的路（每条留一行教训）。',
     tail: path => `完整交接单已写入：${path}（压缩后可回读）`,
     none: '（无）',
     hTitle: node => `# 节点交接：${node}`,
@@ -269,6 +282,8 @@ After "Queued", end the turn now: one line, call no more tools.
     hDone: '已完成',
     hNext: '下一步',
     hDropped: '丢弃的支线',
+    hLessons: '走不通的路及教训',
+    hIntent: '用户最初的需求',
     hRecent: '用户最近原话',
     contMarker: '节点「',
     contHead: (node, before, after, path) => `节点「${node}」已压缩（上下文 ${before}% → ${after}）。交接单：${path}`,
@@ -278,6 +293,8 @@ After "Queued", end the turn now: one line, call no more tools.
     contStanding: '常驻指令（用户原话）：',
     contPending: '待处理：',
     contClosing: '先按下一步继续；需要细节回读交接单。',
+    contRecall: sid =>
+      `摘要会丢细节。需要压缩前的报错原文、数值、路径或命令时，grep transcript ~/.claude/projects/*/${sid}.jsonl，不要猜，也不要重做。`,
     description: cfg => `在任务节点上压缩你自己的上下文。调用只排队：本轮结束后插件自动压缩，并发续接消息让你按 next 继续。
 
 门槛（插件强制，不够会被拒）：<${cfg.floorPct}% 拒绝；${cfg.floorPct}-${cfg.floorPct + NODE_MARGIN_PCT}% 只在大阶段交接压（spec→plan、plan→实现、MR 创建→review）且下一阶段明显够长；>=${cfg.floorPct + NODE_MARGIN_PCT}% 任何干净节点可压。>=${Math.max(cfg.nudgeStartPct, cfg.floorPct)}% 未压插件会提醒；>=${cfg.urgentPct}% 在下一个安全步骤就压，不必等完美节点。
@@ -300,6 +317,7 @@ standing_orders 填用户"不要/必须"、授权、偏好的原话；pending �
     done: '已完成的事，简述',
     next: '压缩后的第一步具体动作',
     drop: '明确丢弃的支线（可选）',
+    lessons: '试过不行的做法及原因，每条一行，免得重试（可选）',
   },
 }
 
@@ -397,6 +415,7 @@ export type Handoff = {
   done: string[]
   next: string
   drop?: string[]
+  lessons?: string[]
 }
 
 const isText = (v: unknown): v is string => typeof v === 'string' && v.trim() !== ''
@@ -404,7 +423,7 @@ const isTexts = (v: unknown): v is string[] => Array.isArray(v) && v.every(isTex
 
 export type HandoffCheck = { ok: true; h: Handoff } | { ok: false; missing: string[] }
 
-/** `standing_orders` and `pending` may be empty arrays; every other field but `drop` is required. */
+/** `standing_orders` and `pending` may be empty arrays; every other field but `drop` and `lessons` is required. */
 export function validateHandoff(x: unknown): HandoffCheck {
   const o = (typeof x === 'object' && x !== null ? x : {}) as Record<string, unknown>
   const missing: string[] = []
@@ -413,7 +432,7 @@ export function validateHandoff(x: unknown): HandoffCheck {
   for (const f of ['decisions', 'artifacts', 'done'] as const) {
     if (!isTexts(o[f]) || (o[f] as string[]).length === 0) missing.push(f)
   }
-  if (o.drop !== undefined && !isTexts(o.drop)) missing.push('drop')
+  for (const f of ['drop', 'lessons'] as const) if (o[f] !== undefined && !isTexts(o[f])) missing.push(f)
   if (missing.length > 0) return { ok: false, missing }
   const h: Handoff = {
     node: o.node as string,
@@ -426,6 +445,7 @@ export function validateHandoff(x: unknown): HandoffCheck {
     next: o.next as string,
   }
   if (o.drop !== undefined) h.drop = o.drop as string[]
+  if (o.lessons !== undefined) h.lessons = o.lessons as string[]
   return { ok: true, h }
 }
 
@@ -438,16 +458,19 @@ function fenced(text: string): string {
   return `${fence}\n${text}\n${fence}`
 }
 
-export function renderHandoff(h: Handoff, userMsgs: readonly string[], lang: Lang = 'en'): string {
+export function renderHandoff(h: Handoff, userMsgs: readonly string[], lang: Lang = 'en', intent?: string): string {
   const t = STRINGS[lang]
   const sec = (title: string): string => `## ${title}`
   const out = [t.hTitle(h.node), sec(t.hObjective), h.objective]
+  // Skipped when the opening request is still among the recent messages.
+  if (intent !== undefined && !userMsgs.includes(intent)) out.push(sec(t.hIntent), fenced(intent))
   out.push(sec(t.hStanding), h.standing_orders.length > 0 ? bullets(h.standing_orders) : t.none)
   if (h.decisions.length > 0) out.push(sec(t.hDecisions), bullets(h.decisions))
   if (h.artifacts.length > 0) out.push(sec(t.hArtifacts), bullets(h.artifacts))
   out.push(sec(t.hPending), h.pending.length > 0 ? bullets(h.pending) : t.none)
   if (h.done.length > 0) out.push(sec(t.hDone), bullets(h.done))
   out.push(sec(t.hNext), h.next)
+  if (h.lessons && h.lessons.length > 0) out.push(sec(t.hLessons), bullets(h.lessons))
   if (h.drop && h.drop.length > 0) out.push(sec(t.hDropped), bullets(h.drop))
   if (userMsgs.length > 0) {
     out.push(sec(t.hRecent))
@@ -468,30 +491,49 @@ const NOT_REAL_USER = [
   ...Object.values(STRINGS).map(t => t.contMarker),
 ]
 
+const isRealUser = (m: { role: string; text: string }): boolean =>
+  m.role === 'user' && m.text.trim() !== '' && !NOT_REAL_USER.some(p => m.text.trimStart().startsWith(p))
+
 /** The last `n` user messages typed by the person, oldest first. */
 export function realUserMessages(msgs: readonly { role: string; text: string }[], n = 5): string[] {
-  const real = msgs
-    .filter(m => m.role === 'user' && m.text.trim() !== '' && !NOT_REAL_USER.some(p => m.text.trimStart().startsWith(p)))
-    .map(m => m.text)
+  const real = msgs.filter(isRealUser).map(m => m.text)
   return n > 0 ? real.slice(-n) : []
+}
+
+export const INTENT_CAP = 1_500
+
+/** The first message the person typed, capped at INTENT_CAP: the task intent that later compactions would otherwise paraphrase away. */
+export function firstUserMessage(msgs: readonly { role: string; text: string }[]): string | undefined {
+  const m = msgs.find(isRealUser)
+  if (m === undefined) return undefined
+  return m.text.length > INTENT_CAP ? `${m.text.slice(0, INTENT_CAP)}\n[...]` : m.text
 }
 
 export const INSTRUCTIONS_CAP = 8_000
 
-/** Compact instructions within INSTRUCTIONS_CAP: drops `done`, then the oldest user messages, then (last resort) `drop`, `decisions`, `artifacts`. standing_orders, pending and next are never trimmed. */
-export function buildInstructions(h: Handoff, userMsgs: readonly string[], handoffPath: string, lang: Lang = 'en'): string {
+/** Compact instructions within INSTRUCTIONS_CAP: drops `done`, then the oldest user messages, then (last resort) `drop`, `lessons`, the original request, `decisions`, `artifacts`. standing_orders, pending and next are never trimmed. */
+export function buildInstructions(
+  h: Handoff,
+  userMsgs: readonly string[],
+  handoffPath: string,
+  lang: Lang = 'en',
+  intent?: string,
+): string {
   const t = STRINGS[lang]
-  const build = (hh: Handoff, msgs: readonly string[]): string =>
-    `${t.preamble}\n\n${renderHandoff(hh, msgs, lang)}\n\n${t.tail(handoffPath)}`
+  const build = (hh: Handoff, msgs: readonly string[], it: string | undefined): string =>
+    `${t.preamble}\n\n${renderHandoff(hh, msgs, lang, it)}\n\n${t.tail(handoffPath)}`
   let cur: Handoff = h
   let msgs = [...userMsgs]
-  const fits = (): boolean => build(cur, msgs).length <= INSTRUCTIONS_CAP
+  let it = intent
+  const fits = (): boolean => build(cur, msgs, it).length <= INSTRUCTIONS_CAP
   if (!fits()) cur = { ...cur, done: [] }
   while (!fits() && msgs.length > 0) msgs = msgs.slice(1)
   if (!fits() && cur.drop) cur = { ...cur, drop: undefined }
+  if (!fits() && cur.lessons) cur = { ...cur, lessons: undefined }
+  if (!fits()) it = undefined
   while (!fits() && cur.decisions.length > 0) cur = { ...cur, decisions: cur.decisions.slice(0, -1) }
   while (!fits() && cur.artifacts.length > 0) cur = { ...cur, artifacts: cur.artifacts.slice(0, -1) }
-  return build(cur, msgs)
+  return build(cur, msgs, it)
 }
 
 export type Continuation = {
@@ -502,6 +544,7 @@ export type Continuation = {
   next?: string
   standing_orders: string[]
   pending: string[]
+  sessionId?: string
 }
 
 export function continuationText(p: Continuation, lang: Lang = 'en'): string {
@@ -514,6 +557,8 @@ export function continuationText(p: Continuation, lang: Lang = 'en'): string {
     `${t.contPending}\n${p.pending.length > 0 ? bullets(p.pending) : t.none}`,
     t.contClosing,
   ]
+  // Models do not look back on their own; the pointer has to be explicit.
+  if (p.sessionId) lines.push(t.contRecall(p.sessionId))
   return lines.join('\n\n')
 }
 
@@ -615,6 +660,7 @@ export type Pending = {
   h: Handoff
   instructions: string
   handoffPath: string
+  sessionId: string
   requestedPct: number
   turnId?: string
   toolCallsSince: number
@@ -700,6 +746,7 @@ function inputSchema(t: Strings) {
       done: { ...strs, description: t.done },
       next: { ...str, description: t.next },
       drop: { ...strs, description: t.drop },
+      lessons: { ...strs, description: t.lessons },
     },
     required: ['node', 'objective', 'standing_orders', 'decisions', 'artifacts', 'pending', 'done', 'next'],
   }
@@ -753,6 +800,22 @@ async function dataRoot($: Dollar): Promise<string | undefined> {
   return home === undefined || home === '' ? undefined : `${home.replace(/[\\/]$/, '')}/.claude/self-compact`
 }
 
+/** The session's opening request, saved on first sight: after a compaction the transcript the engine returns no longer starts with it. */
+async function sessionIntent($: Dollar, path: string, msgs: readonly { role: string; text: string }[]): Promise<string | undefined> {
+  try {
+    if (await $.fs.exists(path)) {
+      const saved = await $.fs.read(path)
+      if (typeof saved === 'string' && saved !== '') return saved
+    }
+    const first = firstUserMessage(msgs)
+    if (first !== undefined) await $.fs.write(path, first)
+    return first
+  } catch {
+    // The original request is a nice-to-have; never block the compaction on it.
+    return undefined
+  }
+}
+
 async function handleCompact($: Dollar, input: Record<string, unknown>, isSub: boolean) {
   const deny = async (reason: string, tag: string, node?: string, pct?: number) => {
     await logLine($, { node, pct, result: `denied:${tag}`, reason })
@@ -779,17 +842,20 @@ async function handleCompact($: Dollar, input: Record<string, unknown>, isSub: b
   const n = state.seq + 1
   const path = `${root}/${sid}/handoff-${n}.md`
   const raw = await $.session.messages()
-  const msgs = realUserMessages(Array.isArray(raw) ? raw : [])
+  const all = Array.isArray(raw) ? raw : []
+  const msgs = realUserMessages(all)
+  const intent = await sessionIntent($, `${root}/${sid}/intent.md`, all)
   try {
-    await $.fs.write(path, renderHandoff(v.h, msgs, state.cfg.language))
+    await $.fs.write(path, renderHandoff(v.h, msgs, state.cfg.language, intent))
   } catch (err) {
     return deny(S().denyWriteFailed(String(err)), 'write-failed', node, g.pct)
   }
   state.seq = n
   state.pending = {
     h: v.h,
-    instructions: buildInstructions(v.h, msgs, path, state.cfg.language),
+    instructions: buildInstructions(v.h, msgs, path, state.cfg.language, intent),
     handoffPath: path,
+    sessionId: sid,
     requestedPct: g.pct,
     toolCallsSince: 0,
     nextValid: true,
@@ -849,6 +915,7 @@ function sendContinuation($: Dollar, p: Pending, beforePct: number, afterPct: nu
     next: p.nextValid ? p.h.next : undefined,
     standing_orders: p.h.standing_orders,
     pending: p.h.pending,
+    sessionId: p.sessionId,
     },
     state.cfg.language,
   )

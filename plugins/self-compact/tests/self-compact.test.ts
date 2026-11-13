@@ -9,6 +9,8 @@ import {
   nudgeLevel,
   detectNode,
   realUserMessages,
+  firstUserMessage,
+  INTENT_CAP,
   renderHandoff,
   TOOL_FULL,
   validateHandoff,
@@ -158,6 +160,65 @@ test('continuationText: no next → fallback sentence', () => {
   expect(t2).not.toContain('已压缩，按用户最新指令继续')
 })
 
+test('continuationText: points at the transcript only when the session id is known', () => {
+  const base = { node: 'N', beforePct: 31, handoffPath: '/x/h.md', standing_orders: [], pending: [] }
+  expect(continuationText({ ...base, sessionId: 'abc' })).toContain('~/.claude/projects/*/abc.jsonl')
+  expect(continuationText({ ...base, sessionId: 'abc' }, 'zh')).toContain('grep transcript ~/.claude/projects/*/abc.jsonl')
+  expect(continuationText(base)).not.toContain('.jsonl')
+})
+
+test('validateHandoff: lessons optional, must be strings when given', () => {
+  const v = validateHandoff({ ...HANDOFF, lessons: ['retry with --force broke the lock'] })
+  expect(v.ok).toBe(true)
+  if (v.ok) expect(v.h.lessons).toEqual(['retry with --force broke the lock'])
+  const bad = validateHandoff({ ...HANDOFF, lessons: 'one string' })
+  expect(bad.ok).toBe(false)
+  if (!bad.ok) expect(bad.missing).toEqual(['lessons'])
+})
+
+test('firstUserMessage: skips non-user text and caps length', () => {
+  const msgs = [
+    { role: 'user', text: '<system-reminder>x</system-reminder>' },
+    { role: 'assistant', text: 'hi' },
+    { role: 'user', text: 'build the parser' },
+    { role: 'user', text: 'later message' },
+  ]
+  expect(firstUserMessage(msgs)).toBe('build the parser')
+  expect(firstUserMessage([{ role: 'assistant', text: 'x' }])).toBeUndefined()
+  const long = firstUserMessage([{ role: 'user', text: 'a'.repeat(5_000) }]) as string
+  expect(long.length).toBe(INTENT_CAP + '\n[...]'.length)
+})
+
+test('renderHandoff: original request and lessons get their own sections', () => {
+  const h: Handoff = { ...HANDOFF, lessons: ['LESSON_X'] }
+  const md = renderHandoff(h, ['recent'], 'en', 'ORIGINAL_ASK')
+  expect(md).toContain('## Original request')
+  expect(md).toContain('ORIGINAL_ASK')
+  expect(md).toContain('## Lessons from dead ends')
+  expect(md).toContain('- LESSON_X')
+  // Not repeated when it is still one of the recent messages.
+  expect(renderHandoff(HANDOFF, ['ORIGINAL_ASK'], 'en', 'ORIGINAL_ASK')).not.toContain('## Original request')
+})
+
+test('instructions: preamble asks for exact copies and lists what to drop', () => {
+  for (const lang of ['en', 'zh'] as const) {
+    const out = buildInstructions(HANDOFF, [], '/x/h.md', lang)
+    expect(out).toContain(lang === 'en' ? 'file paths with line numbers' : '带行号的文件路径')
+    expect(out).toContain(lang === 'en' ? 'dead ends' : '走不通的路')
+  }
+})
+
+test('instructions: original request trimmed after lessons, before decisions', () => {
+  const h: Handoff = { ...HANDOFF, lessons: ['LESSON_' + 'l'.repeat(3_000)], decisions: ['DECISION_KEEP'] }
+  const intent = 'INTENT_' + 'i'.repeat(1_400)
+  const pad = 'p'.repeat(8_000 - buildInstructions({ ...h, lessons: undefined }, [], '/x/h.md', 'en', intent).length - 200)
+  const out = buildInstructions({ ...h, objective: h.objective + pad }, [], '/x/h.md', 'en', intent)
+  expect(out.length <= 8_000).toBe(true)
+  expect(out).not.toContain('LESSON_')
+  expect(out).toContain('INTENT_')
+  expect(out).toContain('DECISION_KEEP')
+})
+
 // ---- compact_now tool and queue ----
 // The module under test is loaded fresh by the harness, so its state is read through
 // effects (files, status line, tool results), never through an imported binding.
@@ -254,7 +315,7 @@ function engine(
       .split('\n')
       .filter(Boolean)
       .map(l => JSON.parse(l) as { result: string; session: string; node?: string; pct?: number; reason?: string; beforePct?: number; afterPct?: number; durationMs?: number })
-  return { clock, files, registered, statuses, handoffs, log, usage, compactPlan, compactCalls, toasts, submits, wait, step, stopAnswer, fsFlags }
+  return { clock, files, registered, statuses, handoffs, log, usage, compactPlan, compactCalls, toasts, submits, wait, step, stopAnswer, fsFlags, messages }
 }
 
 const start = ($: Dollar, isInteractive = true) =>
@@ -415,6 +476,24 @@ testZh('tool: valid call queues and writes handoff', async ($, on) => {
   expect(last?.pct).toBe(20)
 })
 
+testZh('tool: original request is saved once and survives a compacted transcript', async ($, on) => {
+  const w = engine(on)
+  w.messages.unshift({ role: 'user', text: '最初的需求：做一个解析器', toolUses: [] })
+  w.messages.push({ role: 'user', text: 'r1', toolUses: [] }, { role: 'user', text: 'r2', toolUses: [] })
+  w.messages.push({ role: 'user', text: 'r3', toolUses: [] }, { role: 'user', text: 'r4', toolUses: [] })
+  w.messages.push({ role: 'user', text: 'r5', toolUses: [] })
+  await start($)
+  await call($, HANDOFF)
+  expect(w.files.get(`${ROOT}/sess1/intent.md`)).toBe('最初的需求：做一个解析器')
+  expect(w.files.get(`${ROOT}/sess1/handoff-1.md`)).toContain('## 用户最初的需求')
+  // After a compaction the engine's transcript starts with the summary.
+  w.messages.splice(0, w.messages.length, { role: 'user', text: '压缩后的新消息', toolUses: [] })
+  await bash($)
+  await call($, { ...HANDOFF, node: '第二个节点' })
+  expect(w.files.get(`${ROOT}/sess1/handoff-2.md`)).toContain('最初的需求：做一个解析器')
+  expect(w.files.get(`${ROOT}/sess1/intent.md`)).toBe('最初的需求：做一个解析器')
+})
+
 testZh('second call replaces queued', async ($, on) => {
   const w = engine(on)
   await start($)
@@ -486,6 +565,7 @@ testZh('executor: compacts after turn and submits continuation with next', async
   expect(w.submits[0].text).toContain('20% → 8%')
   expect(w.submits[0].text).toContain('不要 push')
   expect(w.submits[0].text).toContain('后台 agent A：完成后通知')
+  expect(w.submits[0].text).toContain('~/.claude/projects/*/sess1.jsonl')
   // Nothing left queued: a later turn end does not compact again.
   await turnStart($, 't2')
   await turnComplete($, 't2')

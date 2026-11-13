@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.0 - 2026-11-14
+
+- Added: the compact-instruction preamble names what the summarizer must copy exactly (file paths with line numbers, signatures and load-bearing code lines, error strings, numbers and IDs, the original request and how the goal changed) and what it may drop (logs whose result is stated, repeated reads, the step-by-step path to a conclusion, dead ends reduced to their lesson).
+- Added: an optional `lessons` handoff field for what failed and why, rendered as its own section and trimmed after `drop`.
+- Added: the session's original request rides every handoff. It is saved to `<session-id>/intent.md` on the first `compact_now` (first real user message, capped at 1,500 characters) and reused afterwards, since after a compaction the transcript starts with the summary. Trimmed after `lessons`, before `decisions`.
+- Added: the continuation prompt ends with a pointer to the session transcript (`~/.claude/projects/*/<session-id>.jsonl`) and tells Claude to grep it for exact details instead of guessing or redoing work. The plugin does not read the transcript.
+- Why: billion-context's paper reports models only restore compressed content when told to, and LangWatch measured agents re-reading context and drawing more user corrections in the steps after a compaction.
+
 ## 0.3.3 - 2026-11-13
 
 - Changed: finished work saved to disk and handed over for review now counts as a closed block, so the agent compacts there and lists the review in `pending`. Anti-nodes narrow to a question whose answer decides the next step and an outgoing draft waiting for send.

@@ -111,11 +111,11 @@ The tool description alone does not make Claude compact: in a live session it fi
 
 ## What the handoff keeps
 
-`compact_now` takes a structured handoff: `node`, `objective`, `standing_orders` (your rules and permissions, in your words), `decisions` (with reasons), `artifacts`, `pending` (each running task and how it reports), `done`, `next`, and an optional `drop`. A call missing a required field is denied and the field is named.
+`compact_now` takes a structured handoff: `node`, `objective`, `standing_orders` (your rules and permissions, in your words), `decisions` (with reasons), `artifacts`, `pending` (each running task and how it reports), `done`, `next`, and optional `drop` and `lessons` (what failed and why). A call missing a required field is denied and the field is named.
 
-The plugin renders it to `handoff-<n>.md`, adds your last 5 real messages (commands, system reminders and task notifications are filtered out), and sends the result as the compact instructions with a preamble telling the summarizer to keep standing orders verbatim, list every pending item and end on `next`. Instructions are capped at 8,000 characters; `done` is trimmed first, then your oldest messages. `standing_orders`, `pending` and `next` are never trimmed.
+The plugin renders it to `handoff-<n>.md`, adds your original request (saved once per session, so it survives repeated compactions) and your last 5 real messages (commands, system reminders and task notifications are filtered out), and sends the result as the compact instructions. A preamble tells the summarizer to keep standing orders verbatim, list every pending item and end on `next`, to copy paths with line numbers, error strings, values and signatures exactly, and to drop stale logs, repeated reads and dead ends (keeping their lesson). Instructions are capped at 8,000 characters; `done` is trimmed first, then your oldest messages. `standing_orders`, `pending` and `next` are never trimmed.
 
-After compaction the same standing orders and pending items arrive again, verbatim, in the continuation prompt, so they do not depend on how the summarizer paraphrased them. Claude can also re-read the full handoff file.
+After compaction the same standing orders and pending items arrive again, verbatim, in the continuation prompt, so they do not depend on how the summarizer paraphrased them. Claude can also re-read the full handoff file, and the continuation tells it to grep the session transcript when it needs an exact detail from before compaction.
 
 ## Cost model
 
@@ -154,7 +154,8 @@ Set the options through the plugin settings (`userConfig` in `plugin.json`), for
 
 Everything lives under `~/.claude/self-compact/`, never inside a repository:
 
-- `<session-id>/handoff-<n>.md`: the rendered handoff plus your last 5 real messages.
+- `<session-id>/handoff-<n>.md`: the rendered handoff plus your original request and last 5 real messages.
+- `<session-id>/intent.md`: your first message in the session, capped at 1,500 characters.
 - `log.jsonl` (rotated to `log.1.jsonl` at about 2 MB; an unreadable log is left untouched, never overwritten): one JSON line per request with `ts`, `session`, `node`, `pct` (usage at request), `result` (`queued`, `denied:<why>`, `done`, `preempted`, `aborted`, `stale`, `failed`, `error`), an optional `reason`, `beforePct`, `afterPct` and `durationMs`.
 
 Nothing leaves your machine. The plugin makes no network calls and has no dependencies. The compaction itself is Claude Code's own `$.session.compact`, so the summary is produced by the same model and account as the rest of your session. Handoff files contain your own words from the conversation; delete the folder whenever you like.

@@ -111,11 +111,11 @@ claude plugin install self-compact@claude-code-self-compact
 
 ## 交接单保留什么
 
-`compact_now` 接收结构化的交接单：`node`、`objective`、`standing_orders`（你的规则和授权，用你的原话）、`decisions`（含原因）、`artifacts`、`pending`（每个在跑的任务及回报方式）、`done`、`next`，以及可选的 `drop`。缺必填字段时调用被拒绝，并指出缺哪一项。
+`compact_now` 接收结构化的交接单：`node`、`objective`、`standing_orders`（你的规则和授权，用你的原话）、`decisions`（含原因）、`artifacts`、`pending`（每个在跑的任务及回报方式）、`done`、`next`，以及可选的 `drop` 和 `lessons`（试过不行的做法及原因）。缺必填字段时调用被拒绝，并指出缺哪一项。
 
-插件把它渲染成 `handoff-<n>.md`，附上你最近 5 条真实消息（过滤掉命令、系统提醒、任务通知），再作为压缩指令发出，前面加一段固定前言：要求 summarizer 原样保留常驻规则、列全待处理项、以 `next` 收尾。指令总长上限 8,000 字符，超出时先截 `done`，再截你最早的消息；`standing_orders`、`pending`、`next` 永远不截。
+插件把它渲染成 `handoff-<n>.md`，附上你最初的需求（每个会话只存一次，多次压缩也不会走样）和最近 5 条真实消息（过滤掉命令、系统提醒、任务通知），再作为压缩指令发出。前面的固定前言要求 summarizer 原样保留常驻规则、列全待处理项、以 `next` 收尾；带行号的路径、报错原文、数值和签名原样照抄；过时的日志、重复读取和走不通的路可以丢，但留下教训。指令总长上限 8,000 字符，超出时先截 `done`，再截你最早的消息；`standing_orders`、`pending`、`next` 永远不截。
 
-压缩之后，同样的常驻规则和待处理项会再通过续接消息原文送回，不依赖 summarizer 怎么转述。Claude 也可以回读完整的交接文件。
+压缩之后，同样的常驻规则和待处理项会再通过续接消息原文送回，不依赖 summarizer 怎么转述。Claude 也可以回读完整的交接文件；续接消息还会告诉它，需要压缩前的确切细节时去 grep 本会话的 transcript。
 
 ## 成本模型
 
@@ -154,7 +154,8 @@ claude plugin install self-compact@claude-code-self-compact
 
 所有数据都在 `~/.claude/self-compact/` 下，不进任何仓库：
 
-- `<session-id>/handoff-<n>.md`：渲染后的交接单，加上你最近 5 条真实消息。
+- `<session-id>/handoff-<n>.md`：渲染后的交接单，加上你最初的需求和最近 5 条真实消息。
+- `<session-id>/intent.md`：你在本会话的第一条消息，上限 1,500 字符。
 - `log.jsonl`：每次请求一行 JSON，字段有 `ts`、`session`、`node`、`pct`（请求时占比）、`result`（`queued`、`denied:<原因>`、`done`、`preempted`、`aborted`、`stale`、`failed`、`error`）、可选的 `reason`、`beforePct`、`afterPct`、`durationMs`。
 
 数据不会离开你的机器。插件不发起网络请求，也没有依赖。压缩本身用的是 Claude Code 自带的 `$.session.compact`，所以摘要由你这次会话所用的同一个模型和账号生成。交接文件里是你在对话中的原话，想删随时可以删这个目录。

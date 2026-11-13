@@ -122,11 +122,13 @@ The plugin checks one anti-node mechanically: the last tool call was `AskUserQue
 
 ## Handoff
 
-`compact_now` takes `node`, `objective`, `standing_orders` (the user's rules in their own words), `decisions` (with reasons), `artifacts`, `pending` (each running task and how it reports), `done`, `next`, and optional `drop`. A call missing a required field is denied and the missing field is named.
+`compact_now` takes `node`, `objective`, `standing_orders` (the user's rules in their own words), `decisions` (with reasons), `artifacts`, `pending` (each running task and how it reports), `done`, `next`, and optional `drop` and `lessons` (what failed and why, so it is not retried). A call missing a required field is denied and the missing field is named.
 
-The plugin renders the handoff as markdown, appends the user's last five real messages (commands, system reminders and task notifications are filtered out), writes `handoff-<n>.md`, and sends it as the compact instructions after a fixed preamble that tells the summarizer to keep standing orders verbatim, list every pending item and end with `next`.
+The plugin renders the handoff as markdown, adds the session's original request and the user's last five real messages (commands, system reminders and task notifications are filtered out), writes `handoff-<n>.md`, and sends it as the compact instructions after a fixed preamble. The preamble tells the summarizer to keep standing orders verbatim, list every pending item and end with `next`. It also names what to copy exactly (file paths with line numbers, signatures and load-bearing code lines, error strings, numbers and IDs, the original request and how the goal changed) and what to drop (logs whose result is already stated, repeated reads, the step-by-step path to a conclusion, dead ends reduced to their lesson).
 
-Instructions are capped at 8,000 characters. Trimming order: `done`, then the oldest user messages, then `drop`, `decisions` and `artifacts` (from the end). `standing_orders`, `pending` and `next` are never trimmed.
+The original request is the first real user message, capped at 1,500 characters and saved to `<session-id>/intent.md` on the first `compact_now`. Later calls read the saved copy, because after a compaction the transcript the engine returns starts with the summary, and each generation of summary would paraphrase the intent a little further. It is left out when it is still one of the last five messages.
+
+Instructions are capped at 8,000 characters. Trimming order: `done`, then the oldest user messages, then `drop`, `lessons`, the original request, `decisions` and `artifacts` (from the end). `standing_orders`, `pending` and `next` are never trimmed.
 
 ## Races
 
@@ -152,7 +154,7 @@ Two ways to shrink context exist: ask the built-in summarizer to do it with bett
 
 The cost is time: 30-55 seconds per compaction. If that becomes the limiting factor, replacing the history is the next step to evaluate; it is out of scope for 0.1.
 
-Post-compact context is carried by the continuation prompt (standing orders and pending items verbatim). A `SessionStart` injection with `source: compact` was considered and left out: the continuation already carries both, and a second copy only adds tokens.
+Post-compact context is carried by the continuation prompt (standing orders and pending items verbatim). Its last line points at the session transcript (`~/.claude/projects/*/<session-id>.jsonl`) and tells Claude to grep it for an exact error string, value, path or command instead of guessing or redoing the work. The pointer has to be explicit: billion-context's pilot found models restored compressed content only when told to. The plugin never reads the transcript itself. A `SessionStart` injection with `source: compact` was considered and left out: the continuation already carries both, and a second copy only adds tokens.
 
 ## Nudges
 
@@ -174,7 +176,7 @@ Every successful compaction ends with the continuation prompt, whether it was re
 
 ## Data
 
-`~/.claude/self-compact/<session-id>/handoff-<n>.md` and `~/.claude/self-compact/log.jsonl`. Mods cannot import `node:fs`, so files go through the engine's `$.fs`. Nothing leaves the machine and the plugin makes no network calls.
+`~/.claude/self-compact/<session-id>/handoff-<n>.md`, `~/.claude/self-compact/<session-id>/intent.md` and `~/.claude/self-compact/log.jsonl`. Mods cannot import `node:fs`, so files go through the engine's `$.fs`. Nothing leaves the machine and the plugin makes no network calls.
 
 Past about 2 MB, `log.jsonl` is moved to `log.1.jsonl` and a new file starts. A log that cannot be read is left untouched rather than overwritten.
 
@@ -186,4 +188,4 @@ Everything the user or the model reads comes from one table in `register.ts`, ke
 
 ## Acknowledgements
 
-The design takes ideas from earlier community work and copies no code: the gate-plus-judgment split, post-turn execution, re-check before compacting and Stop-hook release (self-compact by StevenLi-phoenix); fixed handoff sections, verbatim user wording and nudges on tool results (forward-compaction by rezzminator); asking once per threshold (polite-compaction by dtinth). The implementation is a clean-room rewrite.
+The design takes ideas from earlier community work and copies no code: the gate-plus-judgment split, post-turn execution, re-check before compacting and Stop-hook release (self-compact by StevenLi-phoenix); fixed handoff sections, verbatim user wording and nudges on tool results (forward-compaction by rezzminator); asking once per threshold (polite-compaction by dtinth); keep and drop classes for the summary, protecting the opening request, and an explicit recall pointer (billion-context by ranxianglei). The implementation is a clean-room rewrite.

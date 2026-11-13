@@ -107,11 +107,13 @@ Claude 判断到了节点
 
 ## 交接单
 
-`compact_now` 接收 `node`、`objective`、`standing_orders`（用户的规则，原话）、`decisions`（含原因）、`artifacts`、`pending`（每个在跑的任务及回报方式）、`done`、`next`，以及可选的 `drop`。缺必填字段则拒绝并指出缺哪项。
+`compact_now` 接收 `node`、`objective`、`standing_orders`（用户的规则，原话）、`decisions`（含原因）、`artifacts`、`pending`（每个在跑的任务及回报方式）、`done`、`next`，以及可选的 `drop` 和 `lessons`（试过不行的做法及原因，免得重试）。缺必填字段则拒绝并指出缺哪项。
 
-插件把交接单渲染成 markdown，附上用户最近 5 条真实消息（过滤命令、系统提醒、任务通知），写入 `handoff-<n>.md`，再加一段固定前言作为压缩指令发出：要求 summarizer 原样保留常驻规则、列全待处理项、以 `next` 收尾。
+插件把交接单渲染成 markdown，附上本会话用户最初的需求和最近 5 条真实消息（过滤命令、系统提醒、任务通知），写入 `handoff-<n>.md`，再加一段固定前言作为压缩指令发出。前言要求 summarizer 原样保留常驻规则、列全待处理项、以 `next` 收尾；并点名哪些要原样照抄（带行号的文件路径、函数签名和关键代码行、报错原文、数值和 ID、最初的需求及目标的变化），哪些可以丢（结论已写明的日志、重复读取、得出结论的逐步过程、走不通的路只留教训）。
 
-指令上限 8,000 字符。截断顺序：`done`，再是最早的用户消息，再是 `drop`、`decisions`、`artifacts`（从末尾）。`standing_orders`、`pending`、`next` 永不截。
+最初的需求取第一条真实用户消息，上限 1,500 字符，在首次 `compact_now` 时存进 `<session-id>/intent.md`，之后都读这份存档：压缩过后引擎返回的 transcript 从摘要开始，每压一代，摘要都会把原意再转述走样一点。它仍在最近 5 条里时不重复附。
+
+指令上限 8,000 字符。截断顺序：`done`，再是最早的用户消息，再是 `drop`、`lessons`、最初的需求、`decisions`、`artifacts`（从末尾）。`standing_orders`、`pending`、`next` 永不截。
 
 ## 竞态
 
@@ -137,7 +139,7 @@ Claude 判断到了节点
 
 代价是时间：每次 30-55 秒。如果这成为瓶颈，替换历史是下一步要评估的方向，0.1 版不做。
 
-压缩后的上下文由续接消息承载（常驻规则和待处理项原文）。曾考虑 `source: compact` 的 `SessionStart` 注入，最后没有采用：续接消息已经带了这两项，第二份只会多耗 token。
+压缩后的上下文由续接消息承载（常驻规则和待处理项原文）。续接消息最后一行给出本会话 transcript 的位置（`~/.claude/projects/*/<session-id>.jsonl`），要求 Claude 需要报错原文、数值、路径或命令时去 grep，不要猜也不要重做。这句话必须明说：billion-context 的试点发现，模型只有被明确要求时才会回查压缩掉的内容。插件自己从不读 transcript。曾考虑 `source: compact` 的 `SessionStart` 注入，最后没有采用：续接消息已经带了这两项，第二份只会多耗 token。
 
 ## 提醒
 
@@ -159,7 +161,7 @@ Claude 判断到了节点
 
 ## 数据
 
-`~/.claude/self-compact/<session-id>/handoff-<n>.md` 和 `~/.claude/self-compact/log.jsonl`。mods 不能 import `node:fs`，文件通过引擎的 `$.fs` 读写。数据不离开本机，插件不发起网络请求。
+`~/.claude/self-compact/<session-id>/handoff-<n>.md`、`~/.claude/self-compact/<session-id>/intent.md` 和 `~/.claude/self-compact/log.jsonl`。mods 不能 import `node:fs`，文件通过引擎的 `$.fs` 读写。数据不离开本机，插件不发起网络请求。
 
 超过约 2 MB 时，`log.jsonl` 会移到 `log.1.jsonl`，另起新文件；读不出来的日志原样保留，不会被覆盖。
 
@@ -171,4 +173,4 @@ Claude 判断到了节点
 
 ## 致谢
 
-设计借鉴了社区已有方案的思想，没有复制代码：门槛加判断的两层结构、轮末执行、压缩前复查、Stop hook 放行（StevenLi-phoenix 的 self-compact）；固定的交接分段、用户原话原样保留、提醒附在工具结果上（rezzminator 的 forward-compaction）；每条线只问一次（dtinth 的 polite-compaction）。实现是净室重写。
+设计借鉴了社区已有方案的思想，没有复制代码：门槛加判断的两层结构、轮末执行、压缩前复查、Stop hook 放行（StevenLi-phoenix 的 self-compact）；固定的交接分段、用户原话原样保留、提醒附在工具结果上（rezzminator 的 forward-compaction）；每条线只问一次（dtinth 的 polite-compaction）；摘要的保留与丢弃清单、保护最初的需求、明确的回查指引（ranxianglei 的 billion-context）。实现是净室重写。
