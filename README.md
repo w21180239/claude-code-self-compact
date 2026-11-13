@@ -86,11 +86,12 @@ Good nodes:
 - You change topic, or pick the work up again after a pause.
 - A phase handoff: spec or plan written, next step named, merge request created.
 - A subagent returned, or work was delegated and Claude is now waiting, with every running task and its reporting route listed in `pending`.
+- Finished work is saved to disk and handed to you for review or sign-off (a rendered page, a draft file), with what you are asked to look at listed in `pending`.
 - You say "compact", "continue" or "next".
 
 Anti-nodes, where Claude is told not to compact:
 
-- A question is waiting for your answer, or a draft is waiting for you to say send.
+- A question is waiting for your answer and that answer decides the next step, or an outgoing draft is waiting for you to say send.
 - You just corrected something or gave a new rule or permission that is not yet in the handoff.
 - Mid polling, retrying, editing or a debug loop.
 - The API just returned an error, or Claude is waiting for you to log in or dismiss a dialog.
