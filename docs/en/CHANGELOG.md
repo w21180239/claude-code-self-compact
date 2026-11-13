@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.3 - 2026-11-13
+
+- Changed: finished work saved to disk and handed over for review now counts as a closed block, so the agent compacts there and lists the review in `pending`. Anti-nodes narrow to a question whose answer decides the next step and an outgoing draft waiting for send.
+
 ## 0.3.2 - 2026-11-13
 
 - Fixed: a main-loop step reporting all-zero usage overwrote the context fallback with 0, so `compact_now` was denied as "0% (0k)" and the nudge state reset. Such a step now leaves the last reading in place.
