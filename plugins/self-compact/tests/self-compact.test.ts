@@ -323,6 +323,43 @@ testZh('tool: last step total fills a missing engine reading', async ($, on) => 
   expect(String(r.result)).toContain('已排队')
 })
 
+testZh('tool: a step with zero usage keeps the last real reading', async ($, on) => {
+  const w = engine(on, { window: 1_000_000 })
+  await start($)
+  await modelStep($, w, 65_000)
+  await modelStep($, w, 200_000)
+  // A failed or empty response can report all-zero usage; it says nothing about the context.
+  await modelStep($, w, 0)
+  w.usage.tokens = undefined
+  const r = await call($, HANDOFF)
+  expect(r.deny).toBeUndefined()
+  expect(String(r.result)).toContain('已排队')
+})
+
+testZh('tool: a compaction the plugin did not run replaces the last step total', async ($, on) => {
+  const w = engine(on, { window: 1_000_000 })
+  await start($)
+  await modelStep($, w, 65_000)
+  await modelStep($, w, 400_000)
+  w.wait.reportAfter = 80_000
+  // Auto-compact or /compact: the engine still has no reading of its own afterwards.
+  await $.session.compact({ trigger: 'auto', messages: [{ role: 'user', text: 'x', toolUses: [] }] } as never)
+  w.usage.tokens = undefined
+  const r = await call($, HANDOFF)
+  expect(r.deny).toContain('8%')
+})
+
+testZh('tool: a compaction without a reported size leaves no stale reading', async ($, on) => {
+  const w = engine(on, { window: 1_000_000 })
+  await start($)
+  await modelStep($, w, 65_000)
+  await modelStep($, w, 400_000)
+  await $.session.compact({ trigger: 'manual', messages: [{ role: 'user', text: 'x', toolUses: [] }] } as never)
+  w.usage.tokens = undefined
+  const r = await call($, HANDOFF)
+  expect(r.deny).toContain('不可用')
+})
+
 testZh('tool: last step total below the floor still denies', async ($, on) => {
   const w = engine(on, { window: 1_000_000 })
   await start($)

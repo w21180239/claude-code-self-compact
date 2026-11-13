@@ -912,8 +912,8 @@ async function runCompact($: Dollar): Promise<void> {
     const durationMs = (await $.clock.now()) - started
     await dropPending($, p, { result: 'done', beforePct: before, afterPct: after, durationMs })
     state.lastNudgedPct = undefined
-    // The next step reports the post-compaction size; until then the old total is stale.
-    state.lastStepTokens = undefined
+    // The old step total is stale; the result's count stands in until the next step.
+    state.lastStepTokens = tokensAfter
     state.checkedAt.clear()
     $.ui.toast(S().toastDone(String(before ?? '?'), String(after ?? '?')))
     sendContinuation($, p, before ?? p.requestedPct, after)
@@ -933,6 +933,8 @@ export const BASELINE_MAX_MESSAGES = 3
 
 async function onMainStep($: Dollar, u: StepUsage, messageCount: number): Promise<void> {
   const total = u.input_tokens + u.cache_read_input_tokens + u.cache_creation_input_tokens
+  // All-zero usage (a failed or empty response) measures nothing; keep the last reading.
+  if (total === 0) return
   state.lastStepTokens = total
   if (state.baseline === undefined && messageCount <= BASELINE_MAX_MESSAGES) state.baseline = total
   if (!state.interactive || !state.cfg.enabled || (await $.env.get('DISABLE_COMPACT')) === '1') return
@@ -1198,6 +1200,16 @@ export const register: Register = (on, options) => {
     if (r.deny === undefined && hasNotes() && isTextResult(r)) {
       const notes = takeNotes()
       if (notes.length > 0) r = { ...r, context: [...(r.context ?? []), ...notes] }
+    }
+    return r
+  })
+
+  // Auto-compact and /compact shrink the context too; a pre-compaction step total would reopen the gate.
+  on('session.compact', async (_$, e, next) => {
+    const r = await next(e)
+    if (e.agentId === undefined && typeof r.skip !== 'string') {
+      const after = (r as { tokensAfter?: unknown }).tokensAfter
+      state.lastStepTokens = typeof after === 'number' && after > 0 ? after : undefined
     }
     return r
   })

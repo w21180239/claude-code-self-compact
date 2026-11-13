@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.2 - 2026-11-13
+
+- Fixed: a main-loop step reporting all-zero usage overwrote the context fallback with 0, so `compact_now` was denied as "0% (0k)" and the nudge state reset. Such a step now leaves the last reading in place.
+- Fixed: auto-compact and `/compact` left the pre-compaction step total in the fallback until the next request, so on a provider without an engine reading the gate could pass on a context that had just shrunk. The plugin now hooks `session.compact` and replaces the fallback with the compaction's reported size, or clears it.
+- Docs: the gate section names the cause. The engine reads context from the newest assistant message; OpenCode Go serving DeepSeek sends zeros in `message_start` and the real usage only in `message_delta`, so a tool call made mid-stream sees no tokens.
+
 ## 0.3.1 - 2026-11-13
 
 - Fixed: `compact_now` was denied with "Context usage is not available yet" for the whole session on providers that answer with zero usage. The engine then reports no context tokens, so the gate had nothing to read. It now falls back to the total of the last main-loop request's usage, which the plugin already reads on every step; the fallback is cleared at session boundaries and after a compaction. Seen with DeepSeek through an Anthropic-compatible endpoint.
