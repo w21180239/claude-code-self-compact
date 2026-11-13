@@ -34,7 +34,7 @@ Set through the plugin settings (`userConfig`), for example `claude plugin confi
 
 ## Data
 
-Everything lives under `~/.claude/self-compact/`: `<session-id>/handoff-<n>.md` and `log.jsonl` (rotated to `log.1.jsonl` at about 2 MB). The plugin makes no network calls and has no dependencies.
+Everything lives under `~/.claude/self-compact/`: `<session-id>/handoff-<n>.md`, `<session-id>/intent.md` and `log.jsonl` (rotated to `log.1.jsonl` at about 2 MB). The plugin makes no network calls and has no dependencies.
 
 ## More
 
