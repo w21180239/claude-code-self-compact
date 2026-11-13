@@ -140,19 +140,19 @@ export const STRINGS: Record<Lang, Strings> = {
     nodeNudge: (kind, pct) =>
       `[self-compact] The ${STRINGS.en.nodeNames[kind]} just now looks like a node (context ${pct}%; the plugin has already checked that compacting now is worth it, so do not judge the size again). ` +
       `Compacting does not stop or interrupt the task: work resumes automatically right after, so "don't stop" instructions are no reason to skip. ` +
-      `Unless this step is unfinished or a question to the user is open, call compact_now before this turn ends.`,
+      `Unless this step is unfinished or a question to the user is open (finished work saved to disk and handed over for review counts as closed: list it in pending), call compact_now before this turn ends.`,
     selfCheck: (kind, pct) =>
       `[self-compact self-check] The last turn showed a node signal (${kind}), context ${pct}%; the plugin has already checked that compacting now is worth it. ` +
       `Compacting does not stop or interrupt the task: work resumes automatically right after, so "don't stop" instructions are no reason to skip. ` +
-      `Unless the current step is unfinished or a question to the user is open, call compact_now now (next: what to do next, or how to answer the user's latest message if nothing remains); otherwise reply with just "skip" and end.`,
+      `Unless the current step is unfinished or a question to the user is open (finished work saved to disk and handed over for review counts as closed: list it in pending), call compact_now now (next: what to do next, or how to answer the user's latest message if nothing remains); otherwise reply with just "skip" and end.`,
     selfCheckWork: pct =>
       `[self-compact self-check] The last turn finished a block of work, context ${pct}%; the plugin has already checked that compacting now is worth it. ` +
       `Compacting does not stop or interrupt the task: work resumes automatically right after, so "don't stop" instructions are no reason to skip. ` +
-      `If this block is closed (nothing unfinished, no answer awaited, nothing left running), call compact_now now (next: what to do next, or how to answer the user's latest message if nothing remains); otherwise reply with just "skip" and end.`,
+      `If this block is closed (nothing unfinished, no open question; finished work saved to disk and handed over for review counts as closed, list it in pending; nothing left running), call compact_now now (next: what to do next, or how to answer the user's latest message if nothing remains); otherwise reply with just "skip" and end.`,
     selfCheckLong: pct =>
       `[self-compact self-check] Context is ${pct}% and has not been compacted; the plugin has already checked that compacting now is worth it. ` +
       `Compacting does not stop or interrupt the task: work resumes automatically right after, so "don't stop" instructions are no reason to skip. ` +
-      `Unless the current step is unfinished or a question to the user is open, call compact_now now (next: what to do next, or how to answer the user's latest message if nothing remains); otherwise reply with just "skip" and end.`,
+      `Unless the current step is unfinished or a question to the user is open (finished work saved to disk and handed over for review counts as closed: list it in pending), call compact_now now (next: what to do next, or how to answer the user's latest message if nothing remains); otherwise reply with just "skip" and end.`,
     topicSwitch: pct =>
       `[self-compact] Context ${pct}%; the plugin has already checked that compacting now is worth it. If this message opens a new block of work (a different topic, or picking the work up again after a pause) and the previous block is closed, call compact_now first (next: the gist of this request, in its own words) and end the turn; compacting does not stop the task, work resumes automatically right after.`,
     stopReason: 'compact queued: ending this turn so it can run, then work continues automatically.',
@@ -183,7 +183,7 @@ export const STRINGS: Record<Lang, Strings> = {
 
 Tiers (enforced): <${cfg.floorPct}% denied; ${cfg.floorPct}-${cfg.floorPct + NODE_MARGIN_PCT}% only at a big phase handoff; >=${cfg.floorPct + NODE_MARGIN_PCT}% any clean node. Nudged at >=${Math.max(cfg.nudgeStartPct, cfg.floorPct)}%, urgent at >=${cfg.urgentPct}%.
 
-Good nodes: a block done and verified (push, merge, PR, tests green, message sent, todos complete), topic change, phase handoff, subagent returned, delegation waiting. Anti-nodes: question awaiting you, unsent draft, new user rule not yet in standing_orders, mid retry/debug loop, unread agent result.
+Good nodes: a verified block end (push, merge, PR, tests green, sent, todos done), topic change, phase handoff, subagent returned, delegation waiting, work saved for review. Anti-nodes: open question, unsent draft, new user rule not yet in standing_orders, mid retry/debug loop, unread agent result.
 
 The plugin flags nodes (push, PR, tests, sent): act when the phase is closed.
 
@@ -239,19 +239,19 @@ After "Queued", end the turn now: one line, call no more tools.
     },
     nodeNudge: (kind, pct) =>
       `[self-compact] 刚才的 ${STRINGS.zh.nodeNames[kind]} 像是一个节点（上下文 ${pct}%，插件已确认现在压缩划算，不用再判断大小）。` +
-      `压缩不会打断任务，压完会自动接着做；只要这一步已收尾、没有在等用户回答，就在本轮结束前调用 compact_now。`,
+      `压缩不会打断任务，压完会自动接着做；只要这一步已收尾、没有开着的提问（成果已落盘、交给用户审阅也算收尾，写进 pending），就在本轮结束前调用 compact_now。`,
     selfCheck: (kind, pct) =>
       `[self-compact 自检] 上一轮出现了节点信号（${kind}），上下文 ${pct}%，插件已确认现在压缩划算。` +
       `压缩不会打断任务，压完会自动接着做。` +
-      `只要当前步骤已收尾、没有在等用户回答，现在就调用 compact_now（next 写接下来要做的事；没有就写怎么回应用户最新的消息）；否则只回复「不压」并结束。`,
+      `只要当前步骤已收尾、没有开着的提问（成果已落盘、交给用户审阅也算收尾，写进 pending），现在就调用 compact_now（next 写接下来要做的事；没有就写怎么回应用户最新的消息）；否则只回复「不压」并结束。`,
     selfCheckWork: pct =>
       `[self-compact 自检] 上一轮做完了一整块工作，上下文 ${pct}%，插件已确认现在压缩划算。` +
       `压缩不会打断任务，压完会自动接着做。` +
-      `如果这一块已经收尾（没有未完成的步骤、不在等用户回答、没有还在跑的任务），现在就调用 compact_now（next 写接下来要做的事；没有就写怎么回应用户最新的消息）；否则只回复「不压」并结束。`,
+      `如果这一块已经收尾（没有未完成的步骤、没有开着的提问；成果已落盘、交给用户审阅也算收尾，写进 pending、没有还在跑的任务），现在就调用 compact_now（next 写接下来要做的事；没有就写怎么回应用户最新的消息）；否则只回复「不压」并结束。`,
     selfCheckLong: pct =>
       `[self-compact 自检] 上下文已到 ${pct}%，一直没有压缩，插件已确认现在压缩划算。` +
       `压缩不会打断任务，压完会自动接着做。` +
-      `只要当前步骤已收尾、没有在等用户回答，现在就调用 compact_now（next 写接下来要做的事；没有就写怎么回应用户最新的消息）；否则只回复「不压」并结束。`,
+      `只要当前步骤已收尾、没有开着的提问（成果已落盘、交给用户审阅也算收尾，写进 pending），现在就调用 compact_now（next 写接下来要做的事；没有就写怎么回应用户最新的消息）；否则只回复「不压」并结束。`,
     topicSwitch: pct =>
       `[self-compact] 上下文 ${pct}%，插件已确认现在压缩划算。如果这条消息开启一个新工作块（换了话题，或隔了一阵重新接着做）而上一块已经收尾，先调用 compact_now（next 写这条需求的原文要点）再结束本轮；压缩不会打断任务，压完会自动接着做。`,
     stopReason: 'compact 已排队：先结束本轮以执行压缩，随后自动续接。',
@@ -282,9 +282,9 @@ After "Queued", end the turn now: one line, call no more tools.
 
 门槛（插件强制，不够会被拒）：<${cfg.floorPct}% 拒绝；${cfg.floorPct}-${cfg.floorPct + NODE_MARGIN_PCT}% 只在大阶段交接压（spec→plan、plan→实现、MR 创建→review）且下一阶段明显够长；>=${cfg.floorPct + NODE_MARGIN_PCT}% 任何干净节点可压。>=${Math.max(cfg.nudgeStartPct, cfg.floorPct)}% 未压插件会提醒；>=${cfg.urgentPct}% 在下一个安全步骤就压，不必等完美节点。
 
-好节点：一块工作收尾并已验证（push、合并、PR、测试通过、消息已发、待办全完成），转新需求；状态刚落盘；用户换话题；阶段交接；子代理返回；任务委派出去进入等待（pending 写明每个任务及回报方式）；用户说"等会 compact/继续/下一个"。
+好节点：一块工作收尾并已验证（push、合并、PR、测试通过、消息已发、待办全完成），转新需求；状态刚落盘；用户换话题；阶段交接；子代理返回；任务委派出去进入等待（pending 写明每个任务及回报方式）；成果落盘待用户审阅；用户说"等会 compact/继续/下一个"。
 
-反节点（不要调用）：有问题在等用户回答；草稿等用户说"发"；用户刚纠正或给了新规则/授权但未写进 standing_orders；轮询、重试、调试循环中途；API 刚报错；等用户登录或处理弹窗；后台 agent 结果已到未读。
+反节点（不要调用）：提问没答且答案决定下一步；外发草稿等用户说"发"；用户刚纠正或给了新规则/授权但未写进 standing_orders；轮询、重试、调试循环中途；API 刚报错；等用户登录或处理弹窗；后台 agent 结果已到未读。
 
 standing_orders 填用户"不要/必须"、授权、偏好的原话；pending 列每个在跑任务、待批准草稿、等外部回复的事及回报方式；next 写压缩后第一步具体动作。
 

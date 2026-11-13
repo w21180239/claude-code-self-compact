@@ -105,12 +105,13 @@ Good nodes, by frequency in the 214-compaction history:
 3. Topic change: the user asks for something unrelated, or picks the work up after a pause.
 4. Phase handoff: spec or plan written, next step named, merge request created.
 5. A subagent returned, or work was delegated and now waiting, provided the handoff's `pending` lists each running task and how it reports back.
-6. The user says to compact, continue or move on.
+6. Finished work is saved to disk and handed to the user for review or sign-off, with what the user is asked to look at listed in `pending`.
+7. The user says to compact, continue or move on.
 
 Anti-nodes, where compacting loses the most:
 
-- A question is waiting for the user's answer.
-- A draft is waiting for the user to say send.
+- A question is waiting for the user's answer and that answer decides the next step.
+- An outgoing draft is waiting for the user to say send.
 - The user just corrected something or granted a permission that is not yet in the handoff.
 - Mid polling, retrying, editing, or a debug loop.
 - The API just returned an error.

@@ -1129,7 +1129,7 @@ testZh('node nudge: rides the tool result after git push', async ($, on) => {
   const r = await gitPush($)
   expect(r.context?.join('\n')).toBe(
     '[self-compact] 刚才的 git push 像是一个节点（上下文 20%，插件已确认现在压缩划算，不用再判断大小）。' +
-      '压缩不会打断任务，压完会自动接着做；只要这一步已收尾、没有在等用户回答，就在本轮结束前调用 compact_now。',
+      '压缩不会打断任务，压完会自动接着做；只要这一步已收尾、没有开着的提问（成果已落盘、交给用户审阅也算收尾，写进 pending），就在本轮结束前调用 compact_now。',
   )
   const row = w.log().find(l => l.result === 'node-nudge')
   expect(row?.kind).toBe('push')
@@ -1206,7 +1206,7 @@ testZh('self-check: submitted after a node turn without compact_now', async ($, 
   expect(w.submits[0].text).toBe(
     '[self-compact 自检] 上一轮出现了节点信号（push），上下文 20%，插件已确认现在压缩划算。' +
       '压缩不会打断任务，压完会自动接着做。' +
-      '只要当前步骤已收尾、没有在等用户回答，现在就调用 compact_now（next 写接下来要做的事；没有就写怎么回应用户最新的消息）；否则只回复「不压」并结束。',
+      '只要当前步骤已收尾、没有开着的提问（成果已落盘、交给用户审阅也算收尾，写进 pending），现在就调用 compact_now（next 写接下来要做的事；没有就写怎么回应用户最新的消息）；否则只回复「不压」并结束。',
   )
   expect(w.log().some(l => l.result === 'self-check' && l.kind === 'push')).toBe(true)
 })
