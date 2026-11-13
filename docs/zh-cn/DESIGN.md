@@ -51,7 +51,7 @@ Claude 判断到了节点
 
 两者合成一个阈值：`need = max(floorPct x window, baseline + 20k + minSavingK x 1k)`。
 
-`tokens` 取引擎对本会话上下文的读数（`$.session.usage()`）。有些 provider 会返回 usage 全为 0 的响应，引擎因此无法测量，直接不给 tokens——经 Anthropic 兼容端点接入的 DeepSeek 就是如此。这时门槛退回用最近一次主轮请求的 usage 总量，插件本来就在每个 `turn.step` 读这份数据；引擎能测量时两者一致。会话边界和压缩成功后都会清掉这个兜底值，避免压缩前的旧尺寸混过门槛。
+`tokens` 取引擎对本会话上下文的读数（`$.session.usage()`），即最新一条 assistant 消息上的 usage。Anthropic API 在流开头的 `message_start` 事件里就给出输入 token 数；部分 Anthropic 兼容网关在那里给 0，真实数字只放在结尾的 `message_delta` 里，经 OpenCode Go 接入的 DeepSeek 就是如此。引擎收到 `message_delta` 时会把修正后的 usage 写回，所以 transcript 和之后的轮次都正确；但响应仍在流式输出时发起的工具调用读到的是全 0 的快照，引擎因此不给 tokens。这时门槛退回用最近一次主轮请求的 usage 总量，插件本来就在每个 `turn.step` 读这份数据。这个总量比实时上下文落后一次请求（它的输出和工具结果），所以兜底只会偏向拒绝。usage 全为 0 的 step 不更新兜底值。主会话的任何压缩（插件自己的、auto-compact、`/compact`）都会把兜底值换成压缩结果报告的大小，没有报告就清空；会话边界也会清空，避免压缩前的旧尺寸混过门槛。
 
 默认值、基线 65k 时，`need = 125k`。1M 窗口下是 12.5%，与 10% 的下限相差 2.5 个百分点；200k 窗口下是 62.5%，小窗口不再被彻底关死（0.2.0 的 55% 压后比例在那里要求填到 77%）。
 
