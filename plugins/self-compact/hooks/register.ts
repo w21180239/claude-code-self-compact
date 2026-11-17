@@ -104,6 +104,18 @@ type Strings = {
 }
 
 // The strings the user or the model reads. Add a language here and to `Lang`; configFrom accepts only the keys of this table.
+// The three criteria that decide a compaction once the thresholds are passed (design section 10).
+const CRIT = {
+  en:
+    'Compact only if all three hold: (1) the current block is closed (no unfinished step, no open question; finished work saved to disk and handed over for review counts as closed: list it in pending); ' +
+    '(2) the next work does not depend on large raw text in this context (a diff being compared line by line, a long file just read, an error text still to be quoted); ' +
+    '(3) enough work remains to repay a compaction (more than a few calls), a session about to end is not compacted.',
+  zh:
+    '是否压缩由你按三条判断，三条都满足才压：（1）当前块已收尾（没有未完成的步骤、没有开着的提问；成果已落盘、交给用户审阅也算收尾，写进 pending）；' +
+    '（2）接下来的工作不依赖当前上下文里的大段原文（正在逐行对照的 diff、刚读的长文件、还要引用的报错原文）；' +
+    '（3）剩余工作还够长，值得压一次（预计不止几次调用），马上要结束的会话不压。',
+}
+
 export const STRINGS: Record<Lang, Strings> = {
   en: {
     gateNoUsage: 'Context usage is not available yet (before the first request); try again shortly.',
@@ -127,8 +139,9 @@ export const STRINGS: Record<Lang, Strings> = {
     noteFailed: reason =>
       `[self-compact] The queued compact_now could not run (${reason}) and was given up. To still compact, call it again at a suitable node with the latest state.`,
     toastDone: (before, after) => `compacted ${before}% → ${after}%`,
-    nudgeSoft: pct => `[self-compact] Context ${pct}%, watch for the next node and call compact_now.`,
-    nudgeUrgent: pct => `[self-compact] Context ${pct}%, call compact_now at the next safe step, no need to wait for a perfect node.`,
+    nudgeSoft: pct => `[self-compact] Context ${pct}%, past the break-even line (necessary, not sufficient). Watch for the next node; ${CRIT.en} Call compact_now only if all three hold.`,
+    nudgeUrgent: pct =>
+      `[self-compact] Context ${pct}%, auto-compaction is close. Unless (1) fails (the current block is unfinished or a question is open; finished work saved to disk and handed over for review counts as closed: list it in pending), call compact_now at the next safe step, no need to wait for a perfect node.`,
     heavyHarness: pK =>
       `[self-compact] Context after compaction is still ${pK} (plugins, skills, memory), so a compaction saves little: compact at big phase handoffs or near the urgent tier, not at every small node.`,
     nodeNames: {
@@ -147,23 +160,24 @@ export const STRINGS: Record<Lang, Strings> = {
       'agent-done': 'subagent returned',
     },
     nodeNudge: (kind, pct) =>
-      `[self-compact] The ${STRINGS.en.nodeNames[kind]} just now looks like a node (context ${pct}%; the plugin has already checked that compacting now is worth it, so do not judge the size again). ` +
+      `[self-compact] The ${STRINGS.en.nodeNames[kind]} just now looks like a node (context ${pct}%, past the break-even line: necessary, not sufficient). ${CRIT.en} ` +
       `Compacting does not stop or interrupt the task: work resumes automatically right after, so "don't stop" instructions are no reason to skip. ` +
-      `Unless this step is unfinished or a question to the user is open (finished work saved to disk and handed over for review counts as closed: list it in pending), call compact_now before this turn ends.`,
+      `If all three hold, call compact_now before this turn ends.`,
     selfCheck: (kind, pct) =>
-      `[self-compact self-check] The last turn showed a node signal (${kind}), context ${pct}%; the plugin has already checked that compacting now is worth it. ` +
+      `[self-compact self-check] The last turn showed a node signal (${kind}), context ${pct}%, past the break-even line: necessary, not sufficient. ${CRIT.en} ` +
       `Compacting does not stop or interrupt the task: work resumes automatically right after, so "don't stop" instructions are no reason to skip. ` +
-      `Unless the current step is unfinished or a question to the user is open (finished work saved to disk and handed over for review counts as closed: list it in pending), call compact_now now (next: what to do next, or how to answer the user's latest message if nothing remains); otherwise reply with just "skip" and end.`,
+      `If all three hold, call compact_now now (next: what to do next, or how to answer the user's latest message if nothing remains); otherwise reply with just "skip: <one-line reason>" and end.`,
     selfCheckWork: pct =>
-      `[self-compact self-check] The last turn finished a block of work, context ${pct}%; the plugin has already checked that compacting now is worth it. ` +
+      `[self-compact self-check] The last turn finished a block of work, context ${pct}%, past the break-even line: necessary, not sufficient. ${CRIT.en} ` +
       `Compacting does not stop or interrupt the task: work resumes automatically right after, so "don't stop" instructions are no reason to skip. ` +
-      `If this block is closed (nothing unfinished, no open question; finished work saved to disk and handed over for review counts as closed, list it in pending; nothing left running), call compact_now now (next: what to do next, or how to answer the user's latest message if nothing remains); otherwise reply with just "skip" and end.`,
+      `If all three hold, call compact_now now (next: what to do next, or how to answer the user's latest message if nothing remains); otherwise reply with just "skip: <one-line reason>" and end.`,
     selfCheckLong: pct =>
-      `[self-compact self-check] Context is ${pct}% and has not been compacted; the plugin has already checked that compacting now is worth it. ` +
+      `[self-compact self-check] Context is ${pct}% and has not been compacted; it is past the break-even line: necessary, not sufficient. ${CRIT.en} ` +
       `Compacting does not stop or interrupt the task: work resumes automatically right after, so "don't stop" instructions are no reason to skip. ` +
-      `Unless the current step is unfinished or a question to the user is open (finished work saved to disk and handed over for review counts as closed: list it in pending), call compact_now now (next: what to do next, or how to answer the user's latest message if nothing remains); otherwise reply with just "skip" and end.`,
+      `If all three hold, call compact_now now (next: what to do next, or how to answer the user's latest message if nothing remains); otherwise reply with just "skip: <one-line reason>" and end.`,
     topicSwitch: pct =>
-      `[self-compact] Context ${pct}%; the plugin has already checked that compacting now is worth it. If this message opens a new block of work (a different topic, or picking the work up again after a pause) and the previous block is closed, call compact_now first (next: the gist of this request, in its own words) and end the turn; compacting does not stop the task, work resumes automatically right after.`,
+      `[self-compact] Context ${pct}%, past the break-even line: necessary, not sufficient. ${CRIT.en} ` +
+      `If this message opens a new block of work (a different topic, or picking the work up again after a pause) and all three hold, call compact_now first (next: the gist of this request, in its own words) and end the turn; compacting does not stop the task, work resumes automatically right after.`,
     stopReason: 'compact queued: ending this turn so it can run, then work continues automatically.',
     preamble:
       'This compaction was started by the model at a task node. Write the summary from the handoff below: ' +
@@ -236,8 +250,9 @@ After "Queued", end the turn now: one line, call no more tools.
     noteFailed: reason =>
       `[self-compact] 排队的 compact_now 未能执行（${reason}），已放弃。若仍需压缩，请在合适的节点用最新状态重新调用。`,
     toastDone: (before, after) => `压缩 ${before}% → ${after}%`,
-    nudgeSoft: pct => `[self-compact] 上下文 ${pct}%，留意下一个节点调用 compact_now。`,
-    nudgeUrgent: pct => `[self-compact] 上下文 ${pct}%，在下一个安全步骤调用 compact_now，不必等完美节点。`,
+    nudgeSoft: pct => `[self-compact] 上下文 ${pct}%，已过回本线（必要条件）。留意下一个节点；${CRIT.zh}三条都满足再调用 compact_now。`,
+    nudgeUrgent: pct =>
+      `[self-compact] 上下文 ${pct}%，很快会触发自动压缩。除非（1）不满足（当前块未收尾或有开着的提问；成果已落盘、交给用户审阅算收尾，写进 pending），否则在下一个安全步骤调用 compact_now，不必等完美节点。`,
     heavyHarness: pK =>
       `[self-compact] 压缩后上下文仍有 ${pK}（插件、技能、记忆占用大），压一次省得不多：只在大阶段交接或接近紧急档时压，别每个小节点都压。`,
     nodeNames: {
@@ -256,22 +271,23 @@ After "Queued", end the turn now: one line, call no more tools.
       'agent-done': '子代理返回',
     },
     nodeNudge: (kind, pct) =>
-      `[self-compact] 刚才的 ${STRINGS.zh.nodeNames[kind]} 像是一个节点（上下文 ${pct}%，插件已确认现在压缩划算，不用再判断大小）。` +
-      `压缩不会打断任务，压完会自动接着做；只要这一步已收尾、没有开着的提问（成果已落盘、交给用户审阅也算收尾，写进 pending），就在本轮结束前调用 compact_now。`,
+      `[self-compact] 刚才的 ${STRINGS.zh.nodeNames[kind]} 像是一个节点（上下文 ${pct}%，已过回本线，这是压缩的必要条件而非充分条件）。${CRIT.zh}` +
+      `压缩不会打断任务，压完会自动接着做；三条都满足就在本轮结束前调用 compact_now。`,
     selfCheck: (kind, pct) =>
-      `[self-compact 自检] 上一轮出现了节点信号（${kind}），上下文 ${pct}%，插件已确认现在压缩划算。` +
+      `[self-compact 自检] 上一轮出现了节点信号（${kind}），上下文 ${pct}%，已过回本线，这是压缩的必要条件而非充分条件。${CRIT.zh}` +
       `压缩不会打断任务，压完会自动接着做。` +
-      `只要当前步骤已收尾、没有开着的提问（成果已落盘、交给用户审阅也算收尾，写进 pending），现在就调用 compact_now（next 写接下来要做的事；没有就写怎么回应用户最新的消息）；否则只回复「不压」并结束。`,
+      `三条都满足就现在调用 compact_now（next 写接下来要做的事；没有就写怎么回应用户最新的消息）；否则只回复 skip: <一句理由> 并结束。`,
     selfCheckWork: pct =>
-      `[self-compact 自检] 上一轮做完了一整块工作，上下文 ${pct}%，插件已确认现在压缩划算。` +
+      `[self-compact 自检] 上一轮做完了一整块工作，上下文 ${pct}%，已过回本线，这是压缩的必要条件而非充分条件。${CRIT.zh}` +
       `压缩不会打断任务，压完会自动接着做。` +
-      `如果这一块已经收尾（没有未完成的步骤、没有开着的提问；成果已落盘、交给用户审阅也算收尾，写进 pending、没有还在跑的任务），现在就调用 compact_now（next 写接下来要做的事；没有就写怎么回应用户最新的消息）；否则只回复「不压」并结束。`,
+      `三条都满足就现在调用 compact_now（next 写接下来要做的事；没有就写怎么回应用户最新的消息）；否则只回复 skip: <一句理由> 并结束。`,
     selfCheckLong: pct =>
-      `[self-compact 自检] 上下文已到 ${pct}%，一直没有压缩，插件已确认现在压缩划算。` +
+      `[self-compact 自检] 上下文已到 ${pct}%，一直没有压缩，已过回本线，这是压缩的必要条件而非充分条件。${CRIT.zh}` +
       `压缩不会打断任务，压完会自动接着做。` +
-      `只要当前步骤已收尾、没有开着的提问（成果已落盘、交给用户审阅也算收尾，写进 pending），现在就调用 compact_now（next 写接下来要做的事；没有就写怎么回应用户最新的消息）；否则只回复「不压」并结束。`,
+      `三条都满足就现在调用 compact_now（next 写接下来要做的事；没有就写怎么回应用户最新的消息）；否则只回复 skip: <一句理由> 并结束。`,
     topicSwitch: pct =>
-      `[self-compact] 上下文 ${pct}%，插件已确认现在压缩划算。如果这条消息开启一个新工作块（换了话题，或隔了一阵重新接着做）而上一块已经收尾，先调用 compact_now（next 写这条需求的原文要点）再结束本轮；压缩不会打断任务，压完会自动接着做。`,
+      `[self-compact] 上下文 ${pct}%，已过回本线，这是压缩的必要条件而非充分条件。${CRIT.zh}` +
+      `如果这条消息开启一个新工作块（换了话题，或隔了一阵重新接着做）且三条都满足，先调用 compact_now（next 写这条需求的原文要点）再结束本轮；压缩不会打断任务，压完会自动接着做。`,
     stopReason: 'compact 已排队：先结束本轮以执行压缩，随后自动续接。',
     preamble:
       '这是模型在任务节点上主动发起的压缩，请按下面的交接单写摘要：' +
@@ -333,6 +349,15 @@ const S = (): Strings => STRINGS[state.cfg.language]
 const k = (n: number): string => `${Math.round(n / 1000)}k`
 
 /** Context fill, 0-100 with one decimal; undefined before the first request. */
+export const SKIP_REASON_CAP = 200
+
+/** Reason from a `skip: <reason>` self-check reply; undefined for a bare skip or any other text. */
+export function parseSkipReason(answer: string | undefined): string | undefined {
+  const m = /^\s*skip\s*[:：]\s*([\s\S]*)$/i.exec(answer ?? '')
+  const reason = m?.[1]?.trim().slice(0, SKIP_REASON_CAP)
+  return reason === undefined || reason === '' ? undefined : reason
+}
+
 export function pctOf(u: Usage): number | undefined {
   if (u.tokens === undefined || !u.window) return undefined
   return Math.round((u.tokens / u.window) * 1000) / 10
@@ -1423,7 +1448,13 @@ export const register: Register = (on, options) => {
     }
     if (state.checkTurn) {
       state.checkTurn = false
-      if (!e.isAborted) await logLine($, { result: state.compactCalled ? 'self-check:compacted' : 'self-check:declined' })
+      if (!e.isAborted) {
+        if (state.compactCalled) await logLine($, { result: 'self-check:compacted' })
+        else {
+          const reason = parseSkipReason(e.answer)
+          await logLine($, reason === undefined ? { result: 'self-check:declined' } : { result: 'self-check:declined', reason })
+        }
+      }
     }
     if (!e.isAborted) {
       try {

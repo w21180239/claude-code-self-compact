@@ -2,6 +2,7 @@ import { expect, mock, test } from 'claude-code/testing'
 import type { TestBody } from 'claude-code/testing'
 import {
   DEFAULTS,
+  STRINGS,
   callsToTokens,
   learnP,
   pickP,
@@ -591,6 +592,22 @@ testZh('stale after 4 tool calls drops request', async ($, on) => {
 // ---- executor and continuation ----
 
 const turnStart = ($: Dollar, turnId: string) => $.turn.start({ text: 'x', turnId } as never)
+const expectEnCriteria = (t: string) => {
+  expect(t).toContain('break-even line')
+  expect(t).toContain('necessary, not sufficient')
+  expect(t).toContain('(1)')
+  expect(t).toContain('(2)')
+  expect(t).toContain('(3)')
+  expect(t).not.toMatch(/do not judge|already checked/)
+}
+const expectZhCriteria = (t: string) => {
+  expect(t).toContain('回本线')
+  expect(t).toContain('必要条件')
+  expect(t).toContain('（1）')
+  expect(t).toContain('（2）')
+  expect(t).toContain('（3）')
+  expect(t).not.toMatch(/不用再判断|已确认现在压缩划算/)
+}
 const turnComplete = ($: Dollar, turnId: string, isAborted = false, answer = '') =>
   $.turn.complete({
     answer: answer,
@@ -1163,6 +1180,29 @@ test('tool description (en): short with tiers, nodes, anti-nodes and end-the-tur
   }
   expect(d.replace(/[→·]/g, '')).not.toMatch(NON_ASCII)
 })
+test('prompts (en): thresholds are necessary, the three criteria decide', async ($, on) => {
+  const w = engine(on)
+  await start($)
+  await modelStep($, w, 65_000)
+  await modelStep($, w, 300_000)
+  expectEnCriteria(await ctxOf($))
+  await modelStep($, w, 410_000)
+  const urgent = await ctxOf($)
+  expect(urgent).toContain('(1)')
+  expect(urgent).not.toMatch(/do not judge|already checked/)
+  for (const [k, f] of [
+    ['selfCheck', STRINGS.en.selfCheck('push', 20)],
+    ['selfCheckWork', STRINGS.en.selfCheckWork(20)],
+    ['selfCheckLong', STRINGS.en.selfCheckLong(20)],
+    ['topicSwitch', STRINGS.en.topicSwitch(20)],
+    ['nodeNudge', STRINGS.en.nodeNudge('push', 20)],
+  ] as const) {
+    expectEnCriteria(f)
+    expect(k === 'topicSwitch' || k === 'nodeNudge' || f.includes('skip: <one-line reason>')).toBe(true)
+  }
+  expect(STRINGS.zh.nudgeUrgent(40)).toContain('（1）')
+  for (const f of [STRINGS.zh.nudgeSoft(30), STRINGS.zh.selfCheckWork(20), STRINGS.zh.selfCheckLong(20), STRINGS.zh.topicSwitch(20)]) expectZhCriteria(f)
+})
 test('i18n: en nudges and stale note are English', async ($, on) => {
   const w = engine(on)
   await start($)
@@ -1273,10 +1313,9 @@ testZh('node nudge: rides the tool result after git push', async ($, on) => {
   await start($)
   await turnStart($, 't1')
   const r = await gitPush($)
-  expect(r.context?.join('\n')).toBe(
-    '[self-compact] 刚才的 git push 像是一个节点（上下文 20%，插件已确认现在压缩划算，不用再判断大小）。' +
-      '压缩不会打断任务，压完会自动接着做；只要这一步已收尾、没有开着的提问（成果已落盘、交给用户审阅也算收尾，写进 pending），就在本轮结束前调用 compact_now。',
-  )
+  const t = r.context?.join('\n') ?? ''
+  expect(t).toContain('[self-compact] 刚才的 git push 像是一个节点（上下文 20%')
+  expectZhCriteria(t)
   const row = w.log().find(l => l.result === 'node-nudge')
   expect(row?.kind).toBe('push')
   expect(row?.pct).toBe(20)
@@ -1349,11 +1388,9 @@ testZh('self-check: submitted after a node turn without compact_now', async ($, 
   expect(w.submits).toEqual([])
   await w.clock.advance(1)
   expect(w.submits.length).toBe(1)
-  expect(w.submits[0].text).toBe(
-    '[self-compact 自检] 上一轮出现了节点信号（push），上下文 20%，插件已确认现在压缩划算。' +
-      '压缩不会打断任务，压完会自动接着做。' +
-      '只要当前步骤已收尾、没有开着的提问（成果已落盘、交给用户审阅也算收尾，写进 pending），现在就调用 compact_now（next 写接下来要做的事；没有就写怎么回应用户最新的消息）；否则只回复「不压」并结束。',
-  )
+  expect(w.submits[0].text).toContain('[self-compact 自检] 上一轮出现了节点信号（push），上下文 20%')
+  expectZhCriteria(w.submits[0].text)
+  expect(w.submits[0].text).toContain('skip: <一句理由>')
   expect(w.log().some(l => l.result === 'self-check' && l.kind === 'push')).toBe(true)
 })
 
@@ -1369,6 +1406,29 @@ testZh('self-check: not after a turn that already called compact_now', async ($,
   expect(w.submits[0].text).toContain('下一步：实现 Task 1')
   expect(w.log().some(l => l.result === 'self-check')).toBe(false)
 })
+
+const SKIP_CASES: [string, string, string | undefined][] = [
+  ['skip: still comparing the diff line by line', 'reason', 'still comparing the diff line by line'],
+  ['skip', 'bare', undefined],
+  ['Skip：长文件刚读完', 'fullwidth colon', '长文件刚读完'],
+  ['skip: ' + 'x'.repeat(300), 'capped', 'x'.repeat(200)],
+  ['', 'empty answer', undefined],
+]
+for (const [answer, name, reason] of SKIP_CASES) {
+  testZh(`self-check: declined log reason (${name})`, async ($, on) => {
+    const w = engine(on)
+    await start($)
+    await turnStart($, 't1')
+    await gitPush($)
+    await turnComplete($, 't1')
+    await w.clock.advance(1_500)
+    await turnStart($, 't2')
+    await turnComplete($, 't2', false, answer)
+    const row = w.log().at(-1)
+    expect(row?.result).toBe('self-check:declined')
+    expect(row?.reason).toBe(reason)
+  })
+}
 
 testZh('self-check: logs compacted and declined on the following turn', async ($, on) => {
   const w = engine(on)
@@ -1527,9 +1587,10 @@ testZh('topic switch: hint added as soon as the gate opens', async ($, on) => {
   expect(w.submits.at(-1)?.context).toBeUndefined()
   w.usage.tokens = 150_000
   await userPrompt($, '换个需求')
-  expect(w.submits.at(-1)?.context?.join('\n')).toBe(
-    '[self-compact] 上下文 15%，插件已确认现在压缩划算。如果这条消息开启一个新工作块（换了话题，或隔了一阵重新接着做）而上一块已经收尾，先调用 compact_now（next 写这条需求的原文要点）再结束本轮；压缩不会打断任务，压完会自动接着做。',
-  )
+  const tsw = w.submits.at(-1)?.context?.join('\n') ?? ''
+  expect(tsw).toContain('[self-compact] 上下文 15%')
+  expectZhCriteria(tsw)
+  expect(tsw).toContain('新工作块')
   // Slash commands and non-human prompts get none.
   await $.prompt.submit({ text: '/help', command: { name: 'help' }, origin: { kind: 'composer' }, wait: false } as never)
   expect(w.submits.at(-1)?.context).toBeUndefined()
@@ -1609,8 +1670,7 @@ test('nudge text: says the gate passed and compaction does not stop the task', a
   await turnStart($, 't1')
   const r = await gitPush($)
   const t = r.context?.join('\n') ?? ''
-  expect(t).toContain('already checked')
-  expect(t).toContain('do not judge the size again')
+  expectEnCriteria(t)
   expect(t).toContain('does not stop or interrupt the task')
 })
 
@@ -1620,8 +1680,7 @@ testZh('nudge text (zh): says the gate passed and compaction does not stop the t
   await turnStart($, 't1')
   const r = await gitPush($)
   const t = r.context?.join('\n') ?? ''
-  expect(t).toContain('插件已确认现在压缩划算')
-  expect(t).toContain('不用再判断大小')
+  expectZhCriteria(t)
   expect(t).toContain('压缩不会打断任务')
 })
 
