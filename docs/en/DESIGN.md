@@ -66,13 +66,13 @@ The plugin refuses the call when `tokens < floor`. Every tier is derived from P,
 - work = `C(workCalls)`, `workCalls` 8
 - urgent = `min(urgentK x 1k, 0.8 x window)`, `urgentK` 350
 
-Floor, node and work are each capped at urgent, so on a small window the tiers collapse toward the urgent size and the tool still opens. Below the floor the call is denied; from floor to node only a major phase handoff passes; from node any clean node passes; from urgent the nudge says to compact at the next safe step.
+Floor, node and work are each capped at urgent, so on a small window the tiers collapse toward the urgent size and the tool still opens. After capping, every tier is raised to at least `P + 25k` (`MIN_GAIN_K`), so a compaction always frees 25k or more and the context cannot re-trip a tier right after it. Below the floor the call is denied; from floor to node only a major phase handoff passes; from node any clean node passes; from urgent the nudge says to compact at the next safe step.
 
 `tokens` comes from the engine's reading of the session's context (`$.session.usage()`), which is the usage on the newest assistant message. The Anthropic API sends the input counts in the stream's opening `message_start` event. Some Anthropic-compatible gateways send zeros there and the real counts only in the closing `message_delta`; OpenCode Go serving DeepSeek does this. The engine writes the corrected usage back when `message_delta` arrives, so the transcript and later turns are right, but a tool call made while the response is still streaming reads the zero snapshot and the engine reports no tokens. The gate then falls back to the total of the last main-loop request's usage, which the plugin reads on every `turn.step` anyway. That total trails the live context by one request (its output and tool results), so the fallback errs toward denying. A step reporting all-zero usage leaves the fallback unchanged. Any main-session compaction (the plugin's, auto-compact or `/compact`) replaces it with the compaction's reported size, or clears it when there is none, and session boundaries clear it, so a stale pre-compaction size never passes the gate.
 
 ### Cost model
 
-Relative to the input price: cache read 0.1x, 1-hour cache write 2x, output 5x. One compaction costs about `10 x F` cache-read-equivalent tokens, where `F` is `compactCostK` (default 105k, a conservative fixed estimate of generating the summary and re-caching). Not compacting costs `0.1 x (C - P)` more on every later call, with `C` the current context and `P` the post-compact size. Compacting pays back within `N` calls when `N x 0.1 x (C - P) >= 10 x F`:
+Relative to the input price: cache read 0.1x, 1-hour cache write 2x, output 5x. One compaction costs about `F + 0.1 x C` input-token equivalents, where `F` is `compactCostK` (default 105k, a conservative fixed estimate of generating the summary and re-caching) and `0.1 x C` is the cache read of the context being compacted. Not compacting costs `0.1 x (C - P)` more on every later call, with `C` the current context and `P` the post-compact size. Compacting pays back within `N` calls when `N x 0.1 x (C - P) >= F + 0.1 x C`:
 
 `C(N) = (10 x F + N x P) / (N - 1)`
 
@@ -82,7 +82,7 @@ Relative to the input price: cache read 0.1x, 1-hour cache write 2x, output 5x. 
 | 87k | 249k | 213k | 147k |
 | 120k | 287k | 250k | 182k |
 
-**Learning P.** The first main step after each compaction measures the real post-compact size (`pSample` in `log.jsonl`; `afterPct` is the summary size the compaction reported, not the size of the next request). `profile.json` under `~/.claude/self-compact/` keeps an exponentially weighted average (alpha 0.3) per project and globally. A sample more than 50% off the average is an outlier and moves it with alpha 0.1; three consecutive outliers in the same direction reset the average to their mean (n = 3). An estimate is trusted at n >= 3. Fallback order: this session's sample, the project estimate, the global estimate, then session baseline + 25k (baseline 65k when unknown, so 90k). The tool description is re-registered when P changes, so Claude sees the tiers in tokens.
+**Learning P.** The first main step after each compaction measures the real post-compact size (`pSample` in `log.jsonl`; `afterPct` is the summary size the compaction reported, not the size of the next request). `profile.json` under `~/.claude/self-compact/` keeps an exponentially weighted average (alpha 0.3) per project and globally. A sample more than 50% off the average is an outlier and moves it with alpha 0.1; three consecutive outliers in the same direction reset the average to their mean (n = 3). An estimate is trusted at n >= 3. Fallback order: this session's sample, the project estimate, the global estimate, then session baseline + 25k (baseline 65k when unknown, so 90k). The tool is registered once; a `tool.describe` hook renders its description with the tiers in tokens for the current P, and each learned sample invalidates the cached description. The engine sends the new text at the next compaction, so the description lags P by one compaction and the prompt cache is kept (no `breakPromptCache`).
 
 **Heavy harness.** When `C(workCalls)` is at least `urgentK` before clamping, a large harness (MCP, skills) makes compaction pay little. The plugin tells Claude once per session and suggests trimming MCP servers or skills.
 
@@ -180,7 +180,7 @@ Every successful compaction ends with the continuation prompt, whether it was re
 
 ## Data
 
-`~/.claude/self-compact/<session-id>/handoff-<n>.md`, `~/.claude/self-compact/<session-id>/intent.md` and `~/.claude/self-compact/log.jsonl`. Mods cannot import `node:fs`, so files go through the engine's `$.fs`. Nothing leaves the machine and the plugin makes no network calls.
+`~/.claude/self-compact/<session-id>/handoff-<n>.md`, `~/.claude/self-compact/<session-id>/intent.md`, `~/.claude/self-compact/profile.json` and `~/.claude/self-compact/log.jsonl`. `profile.json` holds the learned post-compact size P per project (keyed by absolute cwd path) and globally. `log.jsonl` rows may carry `pSample` and `p`, and `result` also takes `p-sample`, `deprecated` and `tool-describe`. Mods cannot import `node:fs`, so files go through the engine's `$.fs`. Nothing leaves the machine and the plugin makes no network calls.
 
 Past about 2 MB, `log.jsonl` is moved to `log.1.jsonl` and a new file starts. A log that cannot be read is left untouched rather than overwritten.
 

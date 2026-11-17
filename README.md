@@ -65,7 +65,7 @@ After that there is nothing to run. Claude decides when to call the tool.
 
 Two layers. The plugin enforces a floor. Claude decides everything above it, guided by the tool description and by nudges.
 
-The plugin derives every threshold from P, the learned post-compact size (see the [cost model](#cost-model)). It refuses a call below the floor, `max(C(floorCalls), floorPct x window)`, where `C(floorCalls)` is the size at which compacting pays back within 20 later calls. With P = 65k the floor is 124k; on a heavy setup it rises with P. Every tier is capped at the urgent size, `min(urgentK x 1k, 80% of the window)`, so a small window still opens the tool.
+The plugin derives every threshold from P, the learned post-compact size (see the [cost model](#cost-model)). It refuses a call below the floor, `max(C(floorCalls), floorPct x window)`, where `C(floorCalls)` is the size at which compacting pays back within 20 later calls. With P = 87k the floor is 147k; on a heavy setup it rises with P. Every tier is capped at the urgent size, `min(urgentK x 1k, 80% of the window)`, so a small window still opens the tool. Every tier is then raised to at least `P + 25k`, so a compaction always frees 25k or more and the context cannot re-trip a tier right after it.
 
 | Context | Behavior |
 | --- | --- |
@@ -121,7 +121,7 @@ After compaction the same standing orders and pending items arrive again, verbat
 
 A compaction costs tokens and time: it generates a summary and re-caches what remains. It pays off when enough calls follow at the smaller size.
 
-Assumptions: relative to the input price, cache read is 0.1x, 1-hour cache write 2x and output 5x. One compaction costs about `10 x F` in cache-read-equivalent tokens, where `F` is `compactCostK` (default 105k, a conservative fixed estimate for generating the summary and re-caching). Not compacting costs `0.1 x (C - P)` more on every later call, where `C` is the current context and `P` is the post-compact size. Compacting at `C` pays back within `N` calls when `N x 0.1 x (C - P) >= 10 x F`, which gives `C(N) = (10 x F + N x P) / (N - 1)`.
+Assumptions: relative to the input price, cache read is 0.1x, 1-hour cache write 2x and output 5x. One compaction costs about `F + 0.1 x C` input-token equivalents, where `F` is `compactCostK` (default 105k, a conservative fixed estimate for generating the summary and re-caching) and `0.1 x C` is the cache read of the context being compacted. Not compacting costs `0.1 x (C - P)` more on every later call, where `C` is the current context and `P` is the post-compact size. Compacting at `C` pays back within `N` calls when `N x 0.1 x (C - P) >= F + 0.1 x C`, which gives `C(N) = (10 x F + N x P) / (N - 1)`.
 
 | P (post-compact size) | C(8) | C(10) | C(20) |
 | --- | --- | --- | --- |
@@ -144,7 +144,7 @@ Set the options through the plugin settings (`userConfig` in `plugin.json`), for
 | `floorCalls` | 20 | floor = the context where compacting pays back within this many later calls (see [cost model](#cost-model)); at least 2 |
 | `nodeCalls` | 10 | node tier: any clean node is allowed from the size that pays back within this many calls |
 | `workCalls` | 8 | work tier: the turn-end self-check treats a work block as a node from this payback size |
-| `urgentK` | 350 | urgent tier in thousand tokens, capped at 80% of the window; every other tier is clamped to it (minimum 50) |
+| `urgentK` | 350 | urgent tier in thousand tokens, capped at 80% of the window; every other tier is clamped to it (minimum 50), then raised to at least P + 25k |
 | `compactCostK` | 105 | fixed cost of one compaction in thousand tokens (summary plus re-caching); minimum 1 |
 | `nudgeStepPct` | 5 | gap between nudges |
 | `releaseStopHooks` | false | true: a queued compaction ends a turn that another Stop hook (such as /goal) holds open. Only works on personal (non-managed) setups; the built-in guard skips user mods' Stop hooks elsewhere (see FAQ) |
@@ -162,7 +162,8 @@ Everything lives under `~/.claude/self-compact/`, never inside a repository:
 
 - `<session-id>/handoff-<n>.md`: the rendered handoff plus your original request and last 5 real messages.
 - `<session-id>/intent.md`: your first message in the session, capped at 1,500 characters.
-- `log.jsonl` (rotated to `log.1.jsonl` at about 2 MB; an unreadable log is left untouched, never overwritten): one JSON line per request with `ts`, `session`, `node`, `pct` (usage at request), `result` (`queued`, `denied:<why>`, `done`, `preempted`, `aborted`, `stale`, `failed`, `error`), an optional `reason`, `beforePct`, `afterPct` and `durationMs`.
+- `profile.json`: the learned post-compact size P, per project (keyed by the absolute cwd path) and globally, each with a sample count.
+- `log.jsonl` (rotated to `log.1.jsonl` at about 2 MB; an unreadable log is left untouched, never overwritten): one JSON line per request with `ts`, `session`, `node`, `pct` (usage at request), `result` (`queued`, `denied:<why>`, `done`, `preempted`, `aborted`, `stale`, `failed`, `error`, `p-sample`, `deprecated`, `tool-describe`), an optional `reason`, `beforePct`, `afterPct`, `durationMs`, `pSample` (measured post-compact size) and `p` (the P in use).
 
 Nothing leaves your machine. The plugin makes no network calls and has no dependencies. The compaction itself is Claude Code's own `$.session.compact`, so the summary is produced by the same model and account as the rest of your session. Handoff files contain your own words from the conversation; delete the folder whenever you like.
 

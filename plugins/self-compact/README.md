@@ -11,7 +11,7 @@ Claude gets a `compact_now` tool. At a clean node (spec written, unit finished, 
 /plugin install self-compact@claude-code-self-compact
 ```
 
-Needs Claude Code 2.1.287 or later. Tuned on 1M-token windows; on a 200k window the floor works out to about 62.5% fill, so auto-compact still owns the late stage.
+Needs Claude Code 2.1.287 or later. Tuned on 1M-token windows; every threshold derives from the learned post-compact size P and is capped at 80% of the window, so on a small window auto-compact still owns the late stage.
 
 ## Configuration
 
@@ -20,13 +20,15 @@ Set through the plugin settings (`userConfig`), for example `claude plugin confi
 | Option | Default | Meaning |
 | --- | --- | --- |
 | `language` | en | `en` or `zh`: language of the tool description, denials, toasts, nudges and continuation prompt; any other value falls back to `en` |
-| `floorPct` | 10 | hard floor, percent of the window |
-| `minSavingK` | 40 | the floor is also at least baseline + 20k + this many thousand tokens |
-| `nudgeStartPct` | 20 | first nudge (raised to the floor when higher) |
+| `floorPct` | 0 | extra floor as a percent of the window; the floor is the larger of this and the `floorCalls` size |
+| `floorCalls` | 20 | floor = the context where compacting pays back within this many later calls (see the cost model in the repository README); at least 2 |
+| `nodeCalls` | 10 | node tier: any clean node is allowed from the size that pays back within this many calls |
+| `workCalls` | 8 | work tier: the turn-end self-check treats a work block as a node from this payback size |
+| `urgentK` | 350 | urgent tier in thousand tokens, capped at 80% of the window; every other tier is clamped to it (minimum 50), then raised to at least P + 25k |
+| `compactCostK` | 105 | fixed cost of one compaction in thousand tokens (summary plus re-caching); minimum 1 |
 | `nudgeStepPct` | 5 | gap between nudges |
-| `urgentPct` | 35 | escalated nudge wording |
 | `releaseStopHooks` | false | true: a queued compaction ends a turn that another Stop hook (such as /goal) holds open. Only works on personal (non-managed) setups; the built-in guard skips user mods' Stop hooks elsewhere (see FAQ) |
-| `autoNodes` | true | Autonomous triggers: a one-line flag after node-like tool calls (push, merge, PR, tests green, message sent, spec/plan written, todos done), a turn-end self-check, and a hint on every human prompt. false turns all three off |
+| `autoNodes` | true | Autonomous triggers: a one-line flag after node-like tool calls (push, merge, PR, tests green, message sent, spec/plan written, todos done), a turn-end self-check, and a hint on every human prompt once the gate is open. false turns all three off |
 | `turnEndCheck` | true | The turn-end self-check only (needs `autoNodes`): after a node, a turn that did real work, or a long uncompacted stretch, one extra turn asks Claude whether to compact |
 | `enabled` | true | false: the tool stays registered, every call is denied, no nudges |
 
@@ -34,7 +36,7 @@ Set through the plugin settings (`userConfig`), for example `claude plugin confi
 
 ## Data
 
-Everything lives under `~/.claude/self-compact/`: `<session-id>/handoff-<n>.md`, `<session-id>/intent.md` and `log.jsonl` (rotated to `log.1.jsonl` at about 2 MB). The plugin makes no network calls and has no dependencies.
+Everything lives under `~/.claude/self-compact/`: `<session-id>/handoff-<n>.md`, `<session-id>/intent.md` and `profile.json` (the learned post-compact size P, per project and globally) and `log.jsonl` (rotated to `log.1.jsonl` at about 2 MB). The plugin makes no network calls and has no dependencies.
 
 ## More
 

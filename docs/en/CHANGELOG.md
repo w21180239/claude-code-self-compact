@@ -7,7 +7,8 @@
 - Added: one-time per-session heavy-harness hint when compaction pays little (`C(workCalls)` at or above `urgentK`).
 - Added: options `floorCalls`, `nodeCalls`, `workCalls`, `urgentK`, `compactCostK`. `floorPct` now defaults to 0.
 - Deprecated: `minSavingK`, `nudgeStartPct` and `urgentPct` are accepted, ignored and logged once at session start.
-- Fixed: a failed tool re-registration is retried on the next step instead of waiting for P to change.
+- Added: every tier is at least `P + 25k`, applied after the urgent cap, so a compaction always frees 25k or more and the context cannot re-trip a tier right after it.
+- Changed: the `compact_now` description is rendered by a `tool.describe` hook and refreshed at the next compaction (one compaction behind P, prompt cache kept); the tool is registered once.
 
 ## 0.4.0 - 2026-11-14
 

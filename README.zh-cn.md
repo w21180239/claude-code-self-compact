@@ -65,7 +65,7 @@ claude plugin install self-compact@claude-code-self-compact
 
 分两层：插件强制一个下限，下限之上由 Claude 判断，依据是工具描述和插件的提醒。
 
-插件的所有门槛都由 P（学到的压后大小，见[成本模型](#成本模型)）推出。低于下限 `max(C(floorCalls), floorPct x window)` 时拒绝调用，其中 `C(floorCalls)` 是压缩后 20 次调用内回本的大小。P = 65k 时下限为 124k；环境偏重时随 P 上升。各档都被紧急档 `min(urgentK x 1k, 窗口的 80%)` 截顶，所以小窗口也能打开工具。
+插件的所有门槛都由 P（学到的压后大小，见[成本模型](#成本模型)）推出。低于下限 `max(C(floorCalls), floorPct x window)` 时拒绝调用，其中 `C(floorCalls)` 是压缩后 20 次调用内回本的大小。P = 87k 时下限为 147k；环境偏重时随 P 上升。各档都被紧急档 `min(urgentK x 1k, 窗口的 80%)` 截顶，所以小窗口也能打开工具。随后每一档都至少抬到 `P + 25k`，保证一次压缩至少释放 25k，压完不会立刻再触发某一档。
 
 | 上下文大小 | 行为 |
 | --- | --- |
@@ -121,7 +121,7 @@ claude plugin install self-compact@claude-code-self-compact
 
 压缩要花 token 和时间：要生成摘要，还要重新缓存剩下的内容。只有压缩之后还有足够多的调用跑在更小的上下文上，才划算。
 
-假设：相对输入单价，cache read 0.1 倍、1 小时 cache write 2 倍、output 5 倍。一次压缩约花 `10 x F`（cache read 当量 tokens），`F` 即 `compactCostK`（默认 105k，生成摘要加重新缓存的保守固定估计）。不压缩则之后每次调用多花 `0.1 x (C - P)`，`C` 是当前上下文，`P` 是压后大小。在 `C` 处压缩，`N` 次调用内回本的条件是 `N x 0.1 x (C - P) >= 10 x F`，即 `C(N) = (10 x F + N x P) / (N - 1)`。
+假设：相对输入单价，cache read 0.1 倍、1 小时 cache write 2 倍、output 5 倍。一次压缩约花 `F + 0.1 x C`（输入 token 当量），`F` 即 `compactCostK`（默认 105k，生成摘要加重新缓存的保守固定估计），`0.1 x C` 是读被压缩上下文的 cache read。不压缩则之后每次调用多花 `0.1 x (C - P)`，`C` 是当前上下文，`P` 是压后大小。在 `C` 处压缩，`N` 次调用内回本的条件是 `N x 0.1 x (C - P) >= F + 0.1 x C`，即 `C(N) = (10 x F + N x P) / (N - 1)`。
 
 | P（压后大小） | C(8) | C(10) | C(20) |
 | --- | --- | --- | --- |
@@ -144,7 +144,7 @@ P 的来源：每次压缩后的第一个主轮请求是压后大小的真实测
 | `floorCalls` | 20 | 下限 = 压缩后该调用数内回本所需的上下文大小（见[成本模型](#成本模型)），至少 2 |
 | `nodeCalls` | 10 | 节点档：达到该调用数内回本的大小后，任何干净节点都可压缩 |
 | `workCalls` | 8 | 实活档：回合末自检从该回本大小起把一段实活视为节点 |
-| `urgentK` | 350 | 紧急档，单位千 tokens，上限为窗口的 80%；其余各档都被它截顶（最小 50） |
+| `urgentK` | 350 | 紧急档，单位千 tokens，上限为窗口的 80%；其余各档都被它截顶（最小 50），再抬到至少 P + 25k |
 | `compactCostK` | 105 | 一次压缩的固定成本，单位千 tokens（摘要加重新缓存），最小 1 |
 | `nudgeStepPct` | 5 | 提醒间隔 |
 | `releaseStopHooks` | false | true 时，排队中的压缩可以结束被其他 Stop hook（如 /goal）撑住的回合。仅在个人（非托管）环境有效；其他环境下内置 guard 会跳过用户 mod 的 Stop hook（见 FAQ） |
@@ -162,7 +162,8 @@ P 的来源：每次压缩后的第一个主轮请求是压后大小的真实测
 
 - `<session-id>/handoff-<n>.md`：渲染后的交接单，加上你最初的需求和最近 5 条真实消息。
 - `<session-id>/intent.md`：你在本会话的第一条消息，上限 1,500 字符。
-- `log.jsonl`：每次请求一行 JSON，字段有 `ts`、`session`、`node`、`pct`（请求时占比）、`result`（`queued`、`denied:<原因>`、`done`、`preempted`、`aborted`、`stale`、`failed`、`error`）、可选的 `reason`、`beforePct`、`afterPct`、`durationMs`。
+- `profile.json`：学到的压后大小 P，按项目（以 cwd 绝对路径为键）和全局各一份，附样本数。
+- `log.jsonl`：每次请求一行 JSON，字段有 `ts`、`session`、`node`、`pct`（请求时占比）、`result`（`queued`、`denied:<原因>`、`done`、`preempted`、`aborted`、`stale`、`failed`、`error`、`p-sample`、`deprecated`、`tool-describe`）、可选的 `reason`、`beforePct`、`afterPct`、`durationMs`、`pSample`（压后实测大小）、`p`（当时采用的 P）。
 
 数据不会离开你的机器。插件不发起网络请求，也没有依赖。压缩本身用的是 Claude Code 自带的 `$.session.compact`，所以摘要由你这次会话所用的同一个模型和账号生成。交接文件里是你在对话中的原话，想删随时可以删这个目录。
 

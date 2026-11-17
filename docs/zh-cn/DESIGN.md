@@ -51,13 +51,13 @@ Claude 判断到了节点
 - work = `C(workCalls)`，`workCalls` 8
 - urgent = `min(urgentK x 1k, 0.8 x window)`，`urgentK` 350
 
-floor、node、work 都被 urgent 截顶，所以小窗口里各档向紧急档收拢，工具仍能打开。低于下限拒绝；下限到节点档只放行大阶段交接；节点档起任何干净节点都可压；紧急档起提醒要求在下一个安全步骤压。
+floor、node、work 都被 urgent 截顶，所以小窗口里各档向紧急档收拢，工具仍能打开。截顶之后每一档再抬到至少 `P + 25k`（`MIN_GAIN_K`），保证一次压缩至少释放 25k，压完不会立刻再触发某一档。低于下限拒绝；下限到节点档只放行大阶段交接；节点档起任何干净节点都可压；紧急档起提醒要求在下一个安全步骤压。
 
 `tokens` 取引擎对本会话上下文的读数（`$.session.usage()`），即最新一条 assistant 消息上的 usage。Anthropic API 在流开头的 `message_start` 事件里就给出输入 token 数；部分 Anthropic 兼容网关在那里给 0，真实数字只放在结尾的 `message_delta` 里，经 OpenCode Go 接入的 DeepSeek 就是如此。引擎收到 `message_delta` 时会把修正后的 usage 写回，所以 transcript 和之后的轮次都正确；但响应仍在流式输出时发起的工具调用读到的是全 0 的快照，引擎因此不给 tokens。这时门槛退回用最近一次主轮请求的 usage 总量，插件本来就在每个 `turn.step` 读这份数据。这个总量比实时上下文落后一次请求（它的输出和工具结果），所以兜底只会偏向拒绝。usage 全为 0 的 step 不更新兜底值。主会话的任何压缩（插件自己的、auto-compact、`/compact`）都会把兜底值换成压缩结果报告的大小，没有报告就清空；会话边界也会清空，避免压缩前的旧尺寸混过门槛。
 
 ### 成本模型
 
-相对输入单价：cache read 0.1 倍、1 小时 cache write 2 倍、output 5 倍。一次压缩约 `10 x F`（cache read 当量 tokens），`F` 即 `compactCostK`（默认 105k，生成摘要加重新缓存的保守固定估计）。不压缩则之后每次调用多花 `0.1 x (C - P)`，`C` 是当前上下文，`P` 是压后大小。`N` 次调用内回本的条件是 `N x 0.1 x (C - P) >= 10 x F`：
+相对输入单价：cache read 0.1 倍、1 小时 cache write 2 倍、output 5 倍。一次压缩约 `F + 0.1 x C`（输入 token 当量），`F` 即 `compactCostK`（默认 105k，生成摘要加重新缓存的保守固定估计），`0.1 x C` 是读被压缩上下文的 cache read。不压缩则之后每次调用多花 `0.1 x (C - P)`，`C` 是当前上下文，`P` 是压后大小。`N` 次调用内回本的条件是 `N x 0.1 x (C - P) >= F + 0.1 x C`：
 
 `C(N) = (10 x F + N x P) / (N - 1)`
 
@@ -67,7 +67,7 @@ floor、node、work 都被 urgent 截顶，所以小窗口里各档向紧急档�
 | 87k | 249k | 213k | 147k |
 | 120k | 287k | 250k | 182k |
 
-**学习 P。** 每次压缩后的第一个主轮请求测得真实压后大小（`log.jsonl` 的 `pSample`；`afterPct` 是压缩上报的摘要大小，不是下一个请求的大小）。`~/.claude/self-compact/profile.json` 按项目和全局各存一份指数加权平均（alpha 0.3）。与均值相差超过 50% 的样本是离群点，以 alpha 0.1 更新；同方向连续 3 个离群点把均值重置为它们的平均（n = 3）。n >= 3 才被信任。回退顺序：本会话样本、项目估计、全局估计、会话基线 + 25k（基线未知取 65k，即 90k）。P 变化时重新注册工具描述，Claude 看到的分层以 tokens 表示。
+**学习 P。** 每次压缩后的第一个主轮请求测得真实压后大小（`log.jsonl` 的 `pSample`；`afterPct` 是压缩上报的摘要大小，不是下一个请求的大小）。`~/.claude/self-compact/profile.json` 按项目和全局各存一份指数加权平均（alpha 0.3）。与均值相差超过 50% 的样本是离群点，以 alpha 0.1 更新；同方向连续 3 个离群点把均值重置为它们的平均（n = 3）。n >= 3 才被信任。回退顺序：本会话样本、项目估计、全局估计、会话基线 + 25k（基线未知取 65k，即 90k）。工具只在会话开始时注册一次；`tool.describe` 钩子按当前 P 渲染描述，分层以 tokens 表示，每学到一个样本就让缓存的描述失效。引擎在下一次压缩时发送新文本，所以描述比 P 滞后一次压缩，prompt cache 得以保留（不设 `breakPromptCache`）。
 
 **重型环境。** 截顶前 `C(workCalls)` 不低于 `urgentK` 时，说明环境（MCP、skill）很重，压缩收益很小。插件每个会话提示 Claude 一次，建议精简 MCP 服务或 skill。
 
@@ -165,7 +165,7 @@ floor、node、work 都被 urgent 截顶，所以小窗口里各档向紧急档�
 
 ## 数据
 
-`~/.claude/self-compact/<session-id>/handoff-<n>.md`、`~/.claude/self-compact/<session-id>/intent.md` 和 `~/.claude/self-compact/log.jsonl`。mods 不能 import `node:fs`，文件通过引擎的 `$.fs` 读写。数据不离开本机，插件不发起网络请求。
+`~/.claude/self-compact/<session-id>/handoff-<n>.md`、`~/.claude/self-compact/<session-id>/intent.md`、`~/.claude/self-compact/profile.json` 和 `~/.claude/self-compact/log.jsonl`。`profile.json` 存学到的压后大小 P，按项目（以 cwd 绝对路径为键）和全局各一份；`log.jsonl` 的行可带 `pSample` 和 `p`，`result` 还有 `p-sample`、`deprecated`、`tool-describe`。mods 不能 import `node:fs`，文件通过引擎的 `$.fs` 读写。数据不离开本机，插件不发起网络请求。
 
 超过约 2 MB 时，`log.jsonl` 会移到 `log.1.jsonl`，另起新文件；读不出来的日志原样保留，不会被覆盖。
 
