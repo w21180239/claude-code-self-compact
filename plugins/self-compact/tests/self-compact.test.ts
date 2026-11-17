@@ -101,6 +101,17 @@ test('thresholds: floorPct is an extra lower bound', () => {
   expect(thresholds(40_000, 1_000_000, { ...DEFAULTS, floorPct: 20 }).floor).toBe(200_000)
 })
 
+test('thresholds: every tier is at least P + 25k, even above urgentK', () => {
+  const t = thresholds(63_000, 1_000_000, { ...DEFAULTS, urgentK: 50 })
+  expect(t.urgent).toBe(88_000)
+  expect(Math.min(t.floor, t.node, t.work)).toBeGreaterThanOrEqual(88_000)
+})
+
+test('thresholds: the minimum gain leaves default tiers unchanged', () => {
+  const t = thresholds(87_000, 1_000_000, DEFAULTS)
+  expect([t.floor, t.node, t.work, t.urgent].map(v => Math.round(v / 1000))).toEqual([147, 213, 249, 350])
+})
+
 test('configFrom: calls clamp to >= 2', () => {
   expect(configFrom({ nodeCalls: 1 }).nodeCalls).toBe(2)
   expect(configFrom({ workCalls: 'x' }).workCalls).toBe(DEFAULTS.workCalls)
@@ -289,16 +300,21 @@ function engine(
   const messages = [{ role: 'user', text: '请继续做 Task 3', toolUses: [] }]
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('session.id', () => ({ value: 'sess1' }))
-  const fail = { usage: false, register: false }
+  const fail = { usage: false }
   on('session.usage', () => {
     if (fail.usage) throw new Error('usage unsupported')
     return { value: { startedAt: 0, context: usage, rateLimits: [] } }
   })
   on('session.messages', () => ({ value: messages }))
   on('tool.register', (_, e) => {
-    if (fail.register) throw new Error('register failed')
     registered.push(e as never)
     return { value: { tool: TOOL_FULL } }
+  })
+  on('tool.describe', (_, e) => ({ description: e.description }))
+  const invalidated: string[] = []
+  on('ui.invalidate', (_, e) => {
+    invalidated.push(e.event)
+    return { value: undefined }
   })
   on('fs.write', (_, e) => {
     files.set(key(e.path), e.text)
@@ -363,7 +379,7 @@ function engine(
       .split('\n')
       .filter(Boolean)
       .map(l => JSON.parse(l) as { result: string; session: string; node?: string; pct?: number; reason?: string; beforePct?: number; afterPct?: number; durationMs?: number })
-  return { clock, files, registered, statuses, handoffs, log, usage, compactPlan, compactCalls, toasts, submits, wait, step, stopAnswer, fsFlags, messages, fail }
+  return { clock, files, registered, invalidated, statuses, handoffs, log, usage, compactPlan, compactCalls, toasts, submits, wait, step, stopAnswer, fsFlags, messages, fail }
 }
 
 const start = ($: Dollar, isInteractive = true) =>
@@ -1773,10 +1789,10 @@ testZh('pSample: first main step after compaction is logged and learned', async 
   const saved = JSON.parse(w.files.get(`${ROOT}/profile.json`) as string)
   expect(saved.global).toEqual({ p: 80_000, n: 1 })
   expect(saved.byProject['/']).toEqual({ p: 80_000, n: 1 })
-  // Learned once: later steps add nothing, and the tool description follows the new P.
+  // Learned once: later steps add nothing, and the tool description is invalidated once.
   await modelStep($, w, 90_000)
   expect(w.log().filter(l => l.result === 'p-sample').length).toBe(1)
-  expect(w.registered.length).toBe(2)
+  expect(w.invalidated).toEqual(['tool.describe'])
 })
 
 testZh('pSample: zero-usage and subagent steps ignored', async ($, on) => {
@@ -1854,27 +1870,40 @@ test('session.start: a throwing usage read still registers compact_now and calls
   expect(r.cwd).toBe('/')
 })
 
-testZh('pSample: a failing re-registration still yields that step\'s nudge', async ($, on) => {
-  const w = engine(on, { tokens: 200_000, window: 200_000 })
+
+const describeTool = ($: Dollar) =>
+  $.tool.describe({ tool: TOOL_FULL, description: 'engine text', provider: { plugin: 'self-compact', tier: 'user' } } as never) as Promise<{ description: string; breakPromptCache?: boolean }>
+
+test('tool.describe: answers with tiers for the current P and does not break the prompt cache', async ($, on) => {
+  const w = engine(on)
+  withProject(w, 87_000)
   await start($)
+  expect((await describeTool($)).description).toContain('147k (15%)')
   await modelStep($, w, 65_000)
   await $.session.compact({ instructions: 'x', messages: [{ role: 'user', text: 's', toolUses: [] }] } as never)
-  w.fail.register = true
-  // P = 170k on a 200k window: every tier clamps to 160k, so the sample itself is urgent.
-  await modelStep($, w, 170_000)
-  expect(w.log().some(l => l.result === 'p-sample')).toBe(true)
-  expect(await ctxOf($)).toContain('下一个安全步骤')
+  await modelStep($, w, 60_000)
+  const r = await describeTool($)
+  expect(r.description).toContain('leaves ~60k')
+  expect(r.description).not.toContain('147k (15%)')
+  expect(r.breakPromptCache).toBeUndefined()
+  expect(w.log().filter(l => l.result === 'tool-describe').map(l => (l as { p?: number }).p)).toEqual([87_000, 60_000])
+  expect(w.registered.length).toBe(1)
 })
 
-test('pSample: a failed re-registration is retried on the next step', async ($, on) => {
-  const w = engine(on, { tokens: 100_000, window: 1_000_000 })
+test('tool.describe: other tools pass through untouched', async ($, on) => {
+  const w = engine(on)
+  await start($)
+  const r = (await $.tool.describe({ tool: 'Bash', description: 'engine text', provider: { plugin: 'engine', tier: 'core' } } as never)) as { description: string }
+  expect(r.description).toBe('engine text')
+})
+
+test('learnSample: invalidates the cached tool description', async ($, on) => {
+  const w = engine(on)
+  const { invalidated } = w
   await start($)
   await modelStep($, w, 65_000)
+  expect(invalidated).toEqual([])
   await $.session.compact({ instructions: 'x', messages: [{ role: 'user', text: 's', toolUses: [] }] } as never)
-  w.fail.register = true
-  await modelStep($, w, 120_000)
-  const before = w.registered.length
-  w.fail.register = false
-  await modelStep($, w, 121_000)
-  expect(w.registered.length).toBe(before + 1)
+  await modelStep($, w, 80_000)
+  expect(invalidated).toEqual(['tool.describe'])
 })

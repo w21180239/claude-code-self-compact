@@ -363,19 +363,23 @@ export function callsToTokens(n: number, p: number, fixedCost: number): number {
 
 export type Thresholds = { p: number; window: number; floor: number; node: number; work: number; urgent: number; heavy: boolean }
 
-/** Tier sizes in tokens from the post-compact size p, clamped to 80% of the window. */
+// A compaction must free at least this much, so no tier sits at or below the post-compact size.
+const MIN_GAIN_K = 25
+
+/** Tier sizes in tokens from the post-compact size p: capped at urgent (80% of the window at most), then raised to p + MIN_GAIN_K. */
 export function thresholds(p: number, window: number, cfg: Config): Thresholds {
   const cost = cfg.compactCostK * 1_000
   const c = (n: number) => callsToTokens(n, p, cost)
+  const minTier = p + MIN_GAIN_K * 1_000
   const urgent = Math.min(cfg.urgentK * 1_000, 0.8 * window)
-  const cap = (v: number) => Math.min(v, urgent)
+  const tier = (v: number) => Math.max(Math.min(v, urgent), minTier)
   return {
     p,
     window,
-    floor: cap(Math.max(c(cfg.floorCalls), (cfg.floorPct / 100) * window)),
-    node: cap(c(cfg.nodeCalls)),
-    work: cap(c(cfg.workCalls)),
-    urgent,
+    floor: tier(Math.max(c(cfg.floorCalls), (cfg.floorPct / 100) * window)),
+    node: tier(c(cfg.nodeCalls)),
+    work: tier(c(cfg.workCalls)),
+    urgent: tier(urgent),
     heavy: c(cfg.workCalls) >= cfg.urgentK * 1_000,
   }
 }
@@ -731,12 +735,10 @@ type State = {
   baseline?: number
   cwd?: string
   profile: Profile
-  // This session's first post-compact size, and whether the next main step is to be sampled for it.
+  // This session's latest post-compact size, and whether the next main step is to be sampled for it.
   sessionP?: number
   awaitingPSample: boolean
   heavyNoted: boolean
-  // P the registered tool description was rendered for.
-  describedP?: number
   // Context tokens of the last main-loop request, for when the engine cannot measure.
   lastStepTokens?: number
   seq: number
@@ -1162,22 +1164,23 @@ async function usageOf($: Dollar): Promise<Usage> {
   return contextOf({ tokens: context.tokens, window: typeof max === 'number' && max > 0 ? max : context.window })
 }
 
-/** (Re)registers compact_now; the description carries tiers in tokens, so it follows P. */
+/** Registers compact_now; the `tool.describe` hook keeps its text current. */
 async function registerTool($: Dollar): Promise<void> {
-  let window = REF_WINDOW
-  try {
-    window = (await usageOf($)).window ?? REF_WINDOW
-  } catch {
-    // No usage reading yet: describe the tiers against the reference window.
-  }
-  const t = currentThresholds(window)
   await $.tool.register({
     name: TOOL,
-    description: S().description(state.cfg, t),
+    description: S().description(state.cfg, currentThresholds(await windowOf($))),
     inputSchema: inputSchema(S()),
     isDeferred: false,
   })
-  state.describedP = t.p
+}
+
+/** The compaction window, else the reference window where usage is not readable yet. */
+async function windowOf($: Dollar): Promise<number> {
+  try {
+    return (await usageOf($)).window ?? REF_WINDOW
+  } catch {
+    return REF_WINDOW
+  }
 }
 
 /** Folds the first main step after a compaction into the profile and the session's P. */
@@ -1192,15 +1195,11 @@ async function learnSample($: Dollar, total: number): Promise<void> {
   fold(state.profile)
   await saveProfile($, fold)
   await logLine($, { result: 'p-sample', pSample: total, p: pickP(state.profile, cwd ?? '', state.sessionP, state.baseline) })
-}
-
-/** Re-registers when the description lags P; a failure is retried on the next step. */
-async function resyncTool($: Dollar): Promise<void> {
-  if (currentThresholds(REF_WINDOW).p === state.describedP) return
+  // The cached description is rewritten at the next compaction (prompt cache kept).
   try {
-    await registerTool($)
+    $.ui.invalidate('tool.describe')
   } catch {
-    // A stale description must not cost this step its nudge.
+    // The old description stays until the next session.
   }
 }
 
@@ -1211,7 +1210,6 @@ async function onMainStep($: Dollar, u: StepUsage, messageCount: number): Promis
   state.lastStepTokens = total
   if (state.baseline === undefined && messageCount <= BASELINE_MAX_MESSAGES) state.baseline = total
   if (state.awaitingPSample) await learnSample($, total)
-  await resyncTool($)
   if (!state.interactive || !state.cfg.enabled || (await $.env.get('DISABLE_COMPACT')) === '1') return
   if (state.pending !== undefined || state.compacting) return
   const window = (await usageOf($)).window
@@ -1260,7 +1258,6 @@ function resetConversation(): void {
   state.sessionP = undefined
   state.awaitingPSample = false
   state.heavyNoted = false
-  state.describedP = undefined
   state.forcing = false
   state.lastEndForced = false
   state.forceFailed = false
@@ -1375,6 +1372,13 @@ export const register: Register = (on, options) => {
     if (stale.length > 0) await logLine($, { result: 'deprecated', reason: stale.join(',') })
     await registerTool($)
     return next(e)
+  })
+
+  // The engine caches the answer until `$.ui.invalidate('tool.describe')`; a changed one reaches the model at the next compaction.
+  on('tool.describe', { tool: TOOL_FULL }, async ($, e, next) => {
+    const t = currentThresholds(await windowOf($))
+    await logLine($, { result: 'tool-describe', p: t.p })
+    return { ...(await next(e)), description: S().description(state.cfg, t) }
   })
 
   on('session.end', async ($, e, next) => {
