@@ -348,7 +348,6 @@ const S = (): Strings => STRINGS[state.cfg.language]
 
 const k = (n: number): string => `${Math.round(n / 1000)}k`
 
-/** Context fill, 0-100 with one decimal; undefined before the first request. */
 export const SKIP_REASON_CAP = 200
 
 /** Reason from a `skip: <reason>` self-check reply; undefined for a bare skip or any other text. */
@@ -358,6 +357,7 @@ export function parseSkipReason(answer: string | undefined): string | undefined 
   return reason === undefined || reason === '' ? undefined : reason
 }
 
+/** Context fill, 0-100 with one decimal; undefined before the first request. */
 export function pctOf(u: Usage): number | undefined {
   if (u.tokens === undefined || !u.window) return undefined
   return Math.round((u.tokens / u.window) * 1000) / 10

@@ -169,7 +169,7 @@ floor、node、work 都被 urgent 截顶，所以小窗口里各档向紧急档�
 
 超过约 2 MB 时，`log.jsonl` 会移到 `log.1.jsonl`，另起新文件；读不出来的日志原样保留，不会被覆盖。
 
-`log.jsonl` 每次请求一行 JSON：`ts`、`session`、`node`、`pct`（请求时占比）、`result`（`queued`、`denied:<原因>`、`done`、`preempted`、`aborted`、`stale`、`failed`、`error`）、可选的 `reason`、`beforePct`、`afterPct`、`durationMs`。
+`log.jsonl` 每次请求一行 JSON：`ts`、`session`、`node`、`pct`（请求时占比）、`result`（`queued`、`denied:<原因>`、`done`、`preempted`、`aborted`、`stale`、`failed`、`error`、`p-sample`、`deprecated`、`tool-describe`、`self-check`、`self-check:compacted`、`self-check:declined`）、可选的 `reason`（`self-check:declined` 上是模型给出的跳过原因，最多 200 字符）、可选的 `pSample` 和 `p`、`beforePct`、`afterPct`、`durationMs`。
 
 ## 语言
 

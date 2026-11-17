@@ -301,7 +301,7 @@ function engine(
   const messages = [{ role: 'user', text: '请继续做 Task 3', toolUses: [] }]
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('session.id', () => ({ value: 'sess1' }))
-  const fail = { usage: false }
+  const fail = { usage: false, invalidate: false }
   on('session.usage', () => {
     if (fail.usage) throw new Error('usage unsupported')
     return { value: { startedAt: 0, context: usage, rateLimits: [] } }
@@ -314,6 +314,7 @@ function engine(
   on('tool.describe', (_, e) => ({ description: e.description }))
   const invalidated: string[] = []
   on('ui.invalidate', (_, e) => {
+    if (fail.invalidate) throw new Error("invalidate unsupported")
     invalidated.push(e.event)
     return { value: undefined }
   })
@@ -1198,7 +1199,7 @@ test('prompts (en): thresholds are necessary, the three criteria decide', async 
     ['nodeNudge', STRINGS.en.nodeNudge('push', 20)],
   ] as const) {
     expectEnCriteria(f)
-    expect(k === 'topicSwitch' || k === 'nodeNudge' || f.includes('skip: <one-line reason>')).toBe(true)
+    if (k.startsWith('selfCheck')) expect(f).toContain('skip: <one-line reason>')
   }
   expect(STRINGS.zh.nudgeUrgent(40)).toContain('（1）')
   for (const f of [STRINGS.zh.nudgeSoft(30), STRINGS.zh.selfCheckWork(20), STRINGS.zh.selfCheckLong(20), STRINGS.zh.topicSwitch(20)]) expectZhCriteria(f)
@@ -1438,8 +1439,9 @@ testZh('self-check: logs compacted and declined on the following turn', async ($
   await turnComplete($, 't1')
   await w.clock.advance(1_500)
   await turnStart($, 't2')
-  await turnComplete($, 't2', false, '不压')
+  await turnComplete($, 't2', false, 'skip: just pushed a small fix, no phase boundary')
   expect(w.log().at(-1)?.result).toBe('self-check:declined')
+  expect(w.log().at(-1)?.reason).toBe('just pushed a small fix, no phase boundary')
   w.usage.tokens = 260_000
   await turnStart($, 't3')
   await gitPush($)
@@ -1546,7 +1548,7 @@ testZh('self-check: rate-limited per kind and growth', async ($, on) => {
   expect(w.submits.length).toBe(1)
   // The check turn itself: Claude declines without tools; no second check follows.
   await turnStart($, 't2')
-  await turnComplete($, 't2', false, '不压')
+  await turnComplete($, 't2', false, 'skip: rate-limit case')
   await w.clock.advance(5_000)
   expect(w.submits.length).toBe(1)
   // Same kind, same size: rate-limited.
@@ -1965,4 +1967,18 @@ test('learnSample: invalidates the cached tool description', async ($, on) => {
   await $.session.compact({ instructions: 'x', messages: [{ role: 'user', text: 's', toolUses: [] }] } as never)
   await modelStep($, w, 80_000)
   expect(invalidated).toEqual(['tool.describe'])
+})
+
+// Sample 80k with urgentK 50: every tier is raised to P + 25k = 105k, and c(8) = (10*cost + 8*80k)/7 >= 50k, so the harness note is due.
+// A nudge cannot fire on the sample step itself (tiers >= P + 25k > sample), so the note is the same-step output observed.
+test('learnSample: a throwing ui.invalidate does not stop the rest of the step', { options: { urgentK: 50 } }, async ($, on) => {
+  const w = engine(on)
+  w.fail.invalidate = true
+  await start($)
+  await modelStep($, w, 65_000)
+  await $.session.compact({ instructions: 'x', messages: [{ role: 'user', text: 's', toolUses: [] }] } as never)
+  await modelStep($, w, 80_000)
+  expect(w.log().some(l => l.result === 'p-sample')).toBe(true)
+  expect(w.invalidated).toEqual([])
+  expect(await ctxOf($)).toMatch(/is still \d+k/)
 })

@@ -15,7 +15,7 @@
 
 </div>
 
-self-compact gives Claude a `compact_now` tool. When Claude finishes a unit of work (a spec is written, a merge request is up, a task is handed to a background agent), it can request a compaction and write the handoff itself: your standing orders in your own words, the decisions and their reasons, what is still pending, and the first step after compaction. The plugin checks that compacting is worth it, runs the compaction after the turn ends, and sends a continuation prompt so work picks up without you typing anything.
+self-compact gives Claude a `compact_now` tool. When Claude finishes a unit of work (a spec is written, a merge request is up, a task is handed to a background agent), it can request a compaction and write the handoff itself: your standing orders in your own words, the decisions and their reasons, what is still pending, and the first step after compaction. The plugin enforces the context thresholds (the break-even floor) and runs the compaction after the turn ends; once past them, Claude decides whether compacting is worth it. After compaction it sends a continuation prompt so work picks up without you typing anything.
 
 ## Why
 
@@ -170,6 +170,7 @@ Nothing leaves your machine. The plugin makes no network calls and has no depend
 ## Limitations
 
 - Built for 1M-token windows. The post-compact ratio rule puts the floor at about 77% of a 200k window, so on small windows the tool is effectively closed and auto-compact does the work.
+- With a large post-compact size on a small window, tiers can exceed 80% of the window (every tier stays at least P + 25k so a compaction always frees something); the engine's auto-compaction may then fire first.
 - Main session only. Subagents are denied; keep them short and split them when they grow.
 - Interactive sessions only. `claude -p`, SDK and cron sessions are denied and get no nudges.
 - No typing detection. Mods cannot see your draft or keystrokes, so the plugin runs only when no turn is active, waits 1.5 s after the turn ends, and the continuation prompt waits for idle. A compaction can still land while you are about to type.

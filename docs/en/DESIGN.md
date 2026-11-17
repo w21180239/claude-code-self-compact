@@ -184,7 +184,7 @@ Every successful compaction ends with the continuation prompt, whether it was re
 
 Past about 2 MB, `log.jsonl` is moved to `log.1.jsonl` and a new file starts. A log that cannot be read is left untouched rather than overwritten.
 
-`log.jsonl` has one JSON line per request: `ts`, `session`, `node`, `pct` (usage at request), `result` (`queued`, `denied:<why>`, `done`, `preempted`, `aborted`, `stale`, `failed`, `error`), an optional `reason`, `beforePct`, `afterPct` and `durationMs`.
+`log.jsonl` has one JSON line per request: `ts`, `session`, `node`, `pct` (usage at request), `result` (`queued`, `denied:<why>`, `done`, `preempted`, `aborted`, `stale`, `failed`, `error`, `p-sample`, `deprecated`, `tool-describe`, `self-check`, `self-check:compacted`, `self-check:declined`), an optional `reason` (on `self-check:declined`, the model's skip reason, at most 200 characters), optional `pSample` and `p`, `beforePct`, `afterPct` and `durationMs`.
 
 ## Language
 
