@@ -915,7 +915,7 @@ export function parseProfile(text: string | undefined): Profile {
     const r = o as Partial<Profile>
     const raw = typeof r.byProject === 'object' && r.byProject !== null && !Array.isArray(r.byProject) ? r.byProject : {}
     const byProject: Record<string, PEst> = {}
-    for (const [key, est] of Object.entries(raw)) if (validEst(est)) byProject[key] = est
+    for (const [key, est] of Object.entries(raw)) if (key !== '__proto__' && validEst(est)) byProject[key] = est
     const { global: g, ...rest } = r
     return validEst(g) ? { ...rest, global: g, byProject } : { ...rest, byProject }
   } catch {
@@ -1164,7 +1164,12 @@ async function usageOf($: Dollar): Promise<Usage> {
 
 /** (Re)registers compact_now; the description carries tiers in tokens, so it follows P. */
 async function registerTool($: Dollar): Promise<void> {
-  const window = (await usageOf($)).window ?? REF_WINDOW
+  let window = REF_WINDOW
+  try {
+    window = (await usageOf($)).window ?? REF_WINDOW
+  } catch {
+    // No usage reading yet: describe the tiers against the reference window.
+  }
   const t = currentThresholds(window)
   state.describedP = t.p
   await $.tool.register({
@@ -1187,7 +1192,13 @@ async function learnSample($: Dollar, total: number): Promise<void> {
   fold(state.profile)
   await saveProfile($, fold)
   await logLine($, { result: 'p-sample', pSample: total, p: pickP(state.profile, cwd ?? '', state.sessionP, state.baseline) })
-  if (currentThresholds(REF_WINDOW).p !== state.describedP) await registerTool($)
+  if (currentThresholds(REF_WINDOW).p !== state.describedP) {
+    try {
+      await registerTool($)
+    } catch {
+      // A stale description must not cost this step its nudge.
+    }
+  }
 }
 
 async function onMainStep($: Dollar, u: StepUsage, messageCount: number): Promise<void> {

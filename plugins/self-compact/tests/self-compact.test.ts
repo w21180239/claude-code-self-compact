@@ -289,9 +289,14 @@ function engine(
   const messages = [{ role: 'user', text: '请继续做 Task 3', toolUses: [] }]
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('session.id', () => ({ value: 'sess1' }))
-  on('session.usage', () => ({ value: { startedAt: 0, context: usage, rateLimits: [] } }))
+  const fail = { usage: false, register: false }
+  on('session.usage', () => {
+    if (fail.usage) throw new Error('usage unsupported')
+    return { value: { startedAt: 0, context: usage, rateLimits: [] } }
+  })
   on('session.messages', () => ({ value: messages }))
   on('tool.register', (_, e) => {
+    if (fail.register) throw new Error('register failed')
     registered.push(e as never)
     return { value: { tool: TOOL_FULL } }
   })
@@ -358,7 +363,7 @@ function engine(
       .split('\n')
       .filter(Boolean)
       .map(l => JSON.parse(l) as { result: string; session: string; node?: string; pct?: number; reason?: string; beforePct?: number; afterPct?: number; durationMs?: number })
-  return { clock, files, registered, statuses, handoffs, log, usage, compactPlan, compactCalls, toasts, submits, wait, step, stopAnswer, fsFlags, messages }
+  return { clock, files, registered, statuses, handoffs, log, usage, compactPlan, compactCalls, toasts, submits, wait, step, stopAnswer, fsFlags, messages, fail }
 }
 
 const start = ($: Dollar, isInteractive = true) =>
@@ -1824,12 +1829,39 @@ test('configFrom: deprecated keys logged once at start', { options: { minSavingK
 })
 
 test('configFrom: urgentK and compactCostK are clamped positive', () => {
-  expect(configFrom({ urgentK: -5, compactCostK: 0 }).urgentK >= 50).toBe(true)
-  expect(configFrom({ urgentK: -5, compactCostK: 0 }).compactCostK >= 1).toBe(true)
+  expect(configFrom({ urgentK: -5, compactCostK: 0 }).urgentK).toBe(50)
+  expect(configFrom({ urgentK: -5, compactCostK: 0 }).compactCostK).toBe(1)
   expect(configFrom({ urgentK: 300 }).urgentK).toBe(300)
 })
 
 test('parseProfile: entries with non-finite p or n read as absent', () => {
   const text = '{"global":{"p":null,"n":3},"byProject":{"/a":{"p":"x","n":1},"/b":{"p":90000,"n":3},"/c":{"p":8e4}}}'
   expect(parseProfile(text)).toEqual({ byProject: { '/b': { p: 90_000, n: 3 } } })
+})
+
+test('parseProfile: a __proto__ project key does not touch the prototype', () => {
+  const p = parseProfile('{"byProject":{"__proto__":{"p":90000,"n":3},"/b":{"p":80000,"n":3}}}')
+  expect(Object.getPrototypeOf(p.byProject)).toBe(Object.prototype)
+  expect((p.byProject as { p?: number }).p).toBeUndefined()
+  expect(p.byProject['/b']).toEqual({ p: 80_000, n: 3 })
+})
+
+test('session.start: a throwing usage read still registers compact_now and calls next', async ($, on) => {
+  const w = engine(on)
+  w.fail.usage = true
+  const r = (await start($)) as { cwd?: string }
+  expect(w.registered.length).toBe(1)
+  expect(r.cwd).toBe('/')
+})
+
+testZh('pSample: a failing re-registration still yields that step\'s nudge', async ($, on) => {
+  const w = engine(on, { tokens: 200_000, window: 200_000 })
+  await start($)
+  await modelStep($, w, 65_000)
+  await $.session.compact({ instructions: 'x', messages: [{ role: 'user', text: 's', toolUses: [] }] } as never)
+  w.fail.register = true
+  // P = 170k on a 200k window: every tier clamps to 160k, so the sample itself is urgent.
+  await modelStep($, w, 170_000)
+  expect(w.log().some(l => l.result === 'p-sample')).toBe(true)
+  expect(await ctxOf($)).toContain('下一个安全步骤')
 })
