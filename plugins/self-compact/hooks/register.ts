@@ -2,10 +2,12 @@ import type { EngineInterface, Register, Timer } from 'claude-code'
 
 export type Config = {
   floorPct: number
-  minSavingK: number
-  nudgeStartPct: number
+  floorCalls: number
+  nodeCalls: number
+  workCalls: number
   nudgeStepPct: number
-  urgentPct: number
+  urgentK: number
+  compactCostK: number
   enabled: boolean
   releaseStopHooks: boolean
   autoNodes: boolean
@@ -14,11 +16,13 @@ export type Config = {
 }
 
 export const DEFAULTS: Config = {
-  floorPct: 10,
-  minSavingK: 40,
-  nudgeStartPct: 20,
+  floorPct: 0,
+  floorCalls: 20,
+  nodeCalls: 10,
+  workCalls: 8,
   nudgeStepPct: 5,
-  urgentPct: 35,
+  urgentK: 350,
+  compactCostK: 105,
   enabled: true,
   releaseStopHooks: false,
   autoNodes: true,
@@ -28,8 +32,6 @@ export const DEFAULTS: Config = {
 
 // Empty session context, measured on the first main request when unavailable.
 export const DEFAULT_BASELINE = 65_000
-// What a compaction is expected to leave beyond the baseline (summary + reinjected files).
-export const POST_COMPACT_EXTRA = 20_000
 
 export type Usage = { tokens?: number; window?: number }
 
@@ -191,7 +193,7 @@ export const STRINGS: Record<Lang, Strings> = {
       `The summary drops detail. When you need an exact error string, value, path or command from before compaction, grep the transcript ~/.claude/projects/*/${sid}.jsonl instead of guessing or redoing the work.`,
     description: cfg => `Compact your own context at a task node. The call queues: the plugin compacts after the turn ends, then resumes you at \`next\`.
 
-Tiers (enforced): <${cfg.floorPct}% denied; ${cfg.floorPct}-${cfg.floorPct + NODE_MARGIN_PCT}% only at a big phase handoff; >=${cfg.floorPct + NODE_MARGIN_PCT}% any clean node. Nudged at >=${Math.max(cfg.nudgeStartPct, cfg.floorPct)}%, urgent at >=${cfg.urgentPct}%.
+Tiers (enforced): <${tierPcts(cfg).floor}% denied; ${tierPcts(cfg).floor}-${tierPcts(cfg).floor + NODE_MARGIN_PCT}% only at a big phase handoff; >=${tierPcts(cfg).floor + NODE_MARGIN_PCT}% any clean node. Nudged at >=${tierPcts(cfg).node}%, urgent at >=${tierPcts(cfg).urgent}%.
 
 Good nodes: a verified block end (push, merge, PR, tests green, sent, todos done), topic change, phase handoff, subagent returned, delegation waiting, work saved for review. Anti-nodes: open question, unsent draft, new user rule not yet in standing_orders, mid retry/debug loop, unread agent result.
 
@@ -297,7 +299,7 @@ After "Queued", end the turn now: one line, call no more tools.
       `摘要会丢细节。需要压缩前的报错原文、数值、路径或命令时，grep transcript ~/.claude/projects/*/${sid}.jsonl，不要猜，也不要重做。`,
     description: cfg => `在任务节点上压缩你自己的上下文。调用只排队：本轮结束后插件自动压缩，并发续接消息让你按 next 继续。
 
-门槛（插件强制，不够会被拒）：<${cfg.floorPct}% 拒绝；${cfg.floorPct}-${cfg.floorPct + NODE_MARGIN_PCT}% 只在大阶段交接压（spec→plan、plan→实现、MR 创建→review）且下一阶段明显够长；>=${cfg.floorPct + NODE_MARGIN_PCT}% 任何干净节点可压。>=${Math.max(cfg.nudgeStartPct, cfg.floorPct)}% 未压插件会提醒；>=${cfg.urgentPct}% 在下一个安全步骤就压，不必等完美节点。
+门槛（插件强制，不够会被拒）：<${tierPcts(cfg).floor}% 拒绝；${tierPcts(cfg).floor}-${tierPcts(cfg).floor + NODE_MARGIN_PCT}% 只在大阶段交接压（spec→plan、plan→实现、MR 创建→review）且下一阶段明显够长；>=${tierPcts(cfg).floor + NODE_MARGIN_PCT}% 任何干净节点可压。>=${tierPcts(cfg).node}% 未压插件会提醒；>=${tierPcts(cfg).urgent}% 在下一个安全步骤就压，不必等完美节点。
 
 好节点：一块工作收尾并已验证（push、合并、PR、测试通过、消息已发、待办全完成），转新需求；状态刚落盘；用户换话题；阶段交接；子代理返回；任务委派出去进入等待（pending 写明每个任务及回报方式）；成果落盘待用户审阅；用户说"等会 compact/继续/下一个"。
 
@@ -339,9 +341,49 @@ function contextOf(u: Usage): Usage {
   return { tokens: u.tokens ?? state.lastStepTokens, window: u.window }
 }
 
-/** Smallest context worth compacting: the percent floor, or the size that still frees minSavingK tokens. */
-export function floorTokens(window: number, baseline: number | undefined, cfg: Config): number {
-  return Math.max((cfg.floorPct / 100) * window, (baseline ?? DEFAULT_BASELINE) + POST_COMPACT_EXTRA + cfg.minSavingK * 1_000)
+// ---- thresholds ----
+
+export const DEPRECATED_KEYS = ['minSavingK', 'nudgeStartPct', 'urgentPct'] as const
+
+/** Old option keys that are still set; accepted but ignored. */
+export function deprecatedKeys(options: Record<string, unknown> | undefined): string[] {
+  const o = options ?? {}
+  return DEPRECATED_KEYS.filter((key) => o[key] !== undefined)
+}
+
+/** Average context per call over n calls when each compaction costs `fixedCost` and leaves `p`: (10*fixedCost + n*p) / (n-1). */
+export function callsToTokens(n: number, p: number, fixedCost: number): number {
+  return (10 * fixedCost + n * p) / (n - 1)
+}
+
+export type Thresholds = { p: number; window: number; floor: number; node: number; work: number; urgent: number; heavy: boolean }
+
+/** Tier sizes in tokens from the post-compact size p, clamped to 80% of the window. */
+export function thresholds(p: number, window: number, cfg: Config): Thresholds {
+  const cost = cfg.compactCostK * 1_000
+  const c = (n: number) => callsToTokens(n, p, cost)
+  const urgent = Math.min(cfg.urgentK * 1_000, 0.8 * window)
+  const cap = (v: number) => Math.min(v, urgent)
+  return {
+    p,
+    window,
+    floor: cap(Math.max(c(cfg.floorCalls), (cfg.floorPct / 100) * window)),
+    node: cap(c(cfg.nodeCalls)),
+    work: cap(c(cfg.workCalls)),
+    urgent,
+    heavy: c(cfg.workCalls) >= cfg.urgentK * 1_000,
+  }
+}
+
+// Interim until the learned post-compact size is wired in.
+const interimThresholds = (window: number, cfg: Config): Thresholds => thresholds(DEFAULT_BASELINE + 25_000, window, cfg)
+
+// Window assumed where none is at hand (tool description, nudgeLevel default).
+const REF_WINDOW = 1_000_000
+const tierPcts = (cfg: Config, window = REF_WINDOW) => {
+  const t = interimThresholds(window, cfg)
+  const pc = (v: number) => Math.round((v / window) * 100)
+  return { floor: pc(t.floor), node: pc(t.node), urgent: pc(t.urgent) }
 }
 
 export type GateResult = { ok: true; pct: number } | { ok: false; reason: string; pct?: number }
@@ -351,7 +393,7 @@ export function gate(u: Usage, baseline: number | undefined, cfg: Config): GateR
   if (pct === undefined || u.tokens === undefined || !u.window) {
     return { ok: false, reason: STRINGS[cfg.language].gateNoUsage }
   }
-  const need = floorTokens(u.window, baseline, cfg)
+  const need = interimThresholds(u.window, cfg).floor
   if (u.tokens < need) {
     const needPct = Math.round((need / u.window) * 1000) / 10
     return {
@@ -365,14 +407,16 @@ export function gate(u: Usage, baseline: number | undefined, cfg: Config): GateR
 
 export type NudgeLevel = 'none' | 'soft' | 'urgent'
 
-/** Nudge from `max(start, floor)`, again only after each further step; urgent from urgentPct. */
-export function nudgeLevel(pct: number, lastNudgedPct: number | undefined, floorPct: number, cfg: Config): NudgeLevel {
-  const start = Math.max(cfg.nudgeStartPct, floorPct)
+/** Nudge from the node tier, again only after each further step; urgent from the urgent tier. */
+export function nudgeLevel(pct: number, lastNudgedPct: number | undefined, floorPct: number, cfg: Config, window = REF_WINDOW): NudgeLevel {
+  const t = interimThresholds(window, cfg)
+  const start = Math.max((t.node / window) * 100, floorPct)
+  const urgentPct = (t.urgent / window) * 100
   if (pct < start) return 'none'
-  const isUrgent = pct >= cfg.urgentPct
+  const isUrgent = pct >= urgentPct
   if (lastNudgedPct !== undefined && pct < lastNudgedPct + cfg.nudgeStepPct) {
     // Crossing into urgent territory escalates at once.
-    if (!(isUrgent && lastNudgedPct < cfg.urgentPct)) return 'none'
+    if (!(isUrgent && lastNudgedPct < urgentPct)) return 'none'
   }
   return isUrgent ? 'urgent' : 'soft'
 }
@@ -381,6 +425,8 @@ const num = (v: unknown, d: number): number => {
   const n = Number(v)
   return v === undefined || v === '' || !Number.isFinite(n) ? d : n
 }
+
+const calls = (v: unknown, d: number): number => Math.max(2, num(v, d))
 
 /** Booleans default on; "false" and "0" turn them off. */
 const flag = (v: unknown): boolean => v === undefined || !(v === false || v === 'false' || v === '0')
@@ -391,10 +437,12 @@ export function configFrom(options: Record<string, unknown> | undefined): Config
   const rs = o.releaseStopHooks
   return {
     floorPct: num(o.floorPct, DEFAULTS.floorPct),
-    minSavingK: num(o.minSavingK, DEFAULTS.minSavingK),
-    nudgeStartPct: num(o.nudgeStartPct, DEFAULTS.nudgeStartPct),
+    floorCalls: calls(o.floorCalls, DEFAULTS.floorCalls),
+    nodeCalls: calls(o.nodeCalls, DEFAULTS.nodeCalls),
+    workCalls: calls(o.workCalls, DEFAULTS.workCalls),
     nudgeStepPct: num(o.nudgeStepPct, DEFAULTS.nudgeStepPct),
-    urgentPct: num(o.urgentPct, DEFAULTS.urgentPct),
+    urgentK: num(o.urgentK, DEFAULTS.urgentK),
+    compactCostK: num(o.compactCostK, DEFAULTS.compactCostK),
     enabled: en === undefined ? true : !(en === false || en === 'false' || en === '0'),
     releaseStopHooks: rs === true || rs === 'true' || rs === '1',
     autoNodes: flag(o.autoNodes),
@@ -1009,11 +1057,12 @@ async function onMainStep($: Dollar, u: StepUsage, messageCount: number): Promis
   const window = (await $.session.usage()).context.window
   const pct = pctOf({ tokens: total, window })
   if (pct === undefined || !window) return
-  const floorPct = (floorTokens(window, state.baseline, state.cfg) / window) * 100
-  const level = nudgeLevel(pct, state.lastNudgedPct, floorPct, state.cfg)
+  const t = interimThresholds(window, state.cfg)
+  const floorPct = (t.floor / window) * 100
+  const level = nudgeLevel(pct, state.lastNudgedPct, floorPct, state.cfg, window)
   if (level === 'none') {
     // Back under the start line: something compacted, so count afresh.
-    if (pct < Math.max(state.cfg.nudgeStartPct, floorPct)) state.lastNudgedPct = undefined
+    if (pct < Math.max((t.node / window) * 100, floorPct)) state.lastNudgedPct = undefined
     return
   }
   state.lastNudgedPct = pct
@@ -1071,15 +1120,15 @@ export const NODE_MARGIN_PCT = 5
 export const CHECK_STEP_PCT = 5
 
 /** Context state for the autonomous triggers; undefined while they must stay quiet. */
-async function triggerGate($: Dollar): Promise<{ pct: number; floorPct: number } | undefined> {
+async function triggerGate($: Dollar): Promise<{ pct: number; floorPct: number; nodePct: number } | undefined> {
   if (!state.cfg.autoNodes || !state.cfg.enabled || !state.interactive) return undefined
   if (state.pending !== undefined || state.compacting) return undefined
   if ((await $.env.get('DISABLE_COMPACT')) === '1') return undefined
   const u = contextOf((await $.session.usage()).context)
   const g = gate(u, state.baseline, state.cfg)
   if (!g.ok || !u.window) return undefined
-  const floorPct = (floorTokens(u.window, state.baseline, state.cfg) / u.window) * 100
-  return { pct: g.pct, floorPct }
+  const t = interimThresholds(u.window, state.cfg)
+  return { pct: g.pct, floorPct: (t.floor / u.window) * 100, nodePct: (t.node / u.window) * 100 }
 }
 
 /** After a main-session tool returns: record the node signal and, at most once per turn, build the nudge line. */
@@ -1108,7 +1157,7 @@ async function scheduleSelfCheck($: Dollar): Promise<void> {
   if (g === undefined) return
   const sig = state.turnSignal
   const weakOk = g.pct >= g.floorPct + NODE_MARGIN_PCT
-  const workStart = Math.max(g.floorPct, state.cfg.nudgeStartPct - NODE_MARGIN_PCT)
+  const workStart = Math.max(g.floorPct, g.nodePct - NODE_MARGIN_PCT)
   let key: string
   let text: string
   if (sig !== undefined && (sig.strength === 'strong' || weakOk)) {
@@ -1117,7 +1166,7 @@ async function scheduleSelfCheck($: Dollar): Promise<void> {
   } else if (state.turnToolCalls >= WORK_TURN_MIN_CALLS && g.pct >= workStart) {
     key = 'work'
     text = S().selfCheckWork(g.pct)
-  } else if (g.pct >= state.cfg.nudgeStartPct) {
+  } else if (g.pct >= g.nodePct) {
     key = 'pct'
     text = S().selfCheckLong(g.pct)
   } else return
