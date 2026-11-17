@@ -2,10 +2,12 @@ import type { EngineInterface, Register, Timer } from 'claude-code'
 
 export type Config = {
   floorPct: number
-  minSavingK: number
-  nudgeStartPct: number
+  floorCalls: number
+  nodeCalls: number
+  workCalls: number
   nudgeStepPct: number
-  urgentPct: number
+  urgentK: number
+  compactCostK: number
   enabled: boolean
   releaseStopHooks: boolean
   autoNodes: boolean
@@ -14,11 +16,13 @@ export type Config = {
 }
 
 export const DEFAULTS: Config = {
-  floorPct: 10,
-  minSavingK: 40,
-  nudgeStartPct: 20,
+  floorPct: 0,
+  floorCalls: 20,
+  nodeCalls: 10,
+  workCalls: 8,
   nudgeStepPct: 5,
-  urgentPct: 35,
+  urgentK: 350,
+  compactCostK: 105,
   enabled: true,
   releaseStopHooks: false,
   autoNodes: true,
@@ -28,8 +32,6 @@ export const DEFAULTS: Config = {
 
 // Empty session context, measured on the first main request when unavailable.
 export const DEFAULT_BASELINE = 65_000
-// What a compaction is expected to leave beyond the baseline (summary + reinjected files).
-export const POST_COMPACT_EXTRA = 20_000
 
 export type Usage = { tokens?: number; window?: number }
 
@@ -87,7 +89,8 @@ type Strings = {
   contPending: string
   contClosing: string
   contRecall: (sessionId: string) => string
-  description: (cfg: Config) => string
+  description: (cfg: Config, t?: Thresholds) => string
+  heavyHarness: (pK: string) => string
   node: string
   objective: string
   standing_orders: string
@@ -101,6 +104,18 @@ type Strings = {
 }
 
 // The strings the user or the model reads. Add a language here and to `Lang`; configFrom accepts only the keys of this table.
+// The three criteria that decide a compaction once the thresholds are passed (design section 10).
+const CRIT = {
+  en:
+    'Compact only if all three hold: (1) the current block is closed (no unfinished step, no open question; finished work saved to disk and handed over for review counts as closed: list it in pending); ' +
+    '(2) the next work does not depend on large raw text in this context (a diff being compared line by line, a long file just read, an error text still to be quoted); ' +
+    '(3) enough work remains to repay a compaction (more than a few calls), a session about to end is not compacted.',
+  zh:
+    '是否压缩由你按三条判断，三条都满足才压：（1）当前块已收尾（没有未完成的步骤、没有开着的提问；成果已落盘、交给用户审阅也算收尾，写进 pending）；' +
+    '（2）接下来的工作不依赖当前上下文里的大段原文（正在逐行对照的 diff、刚读的长文件、还要引用的报错原文）；' +
+    '（3）剩余工作还够长，值得压一次（预计不止几次调用），马上要结束的会话不压。',
+}
+
 export const STRINGS: Record<Lang, Strings> = {
   en: {
     gateNoUsage: 'Context usage is not available yet (before the first request); try again shortly.',
@@ -124,8 +139,11 @@ export const STRINGS: Record<Lang, Strings> = {
     noteFailed: reason =>
       `[self-compact] The queued compact_now could not run (${reason}) and was given up. To still compact, call it again at a suitable node with the latest state.`,
     toastDone: (before, after) => `compacted ${before}% → ${after}%`,
-    nudgeSoft: pct => `[self-compact] Context ${pct}%, watch for the next node and call compact_now.`,
-    nudgeUrgent: pct => `[self-compact] Context ${pct}%, call compact_now at the next safe step, no need to wait for a perfect node.`,
+    nudgeSoft: pct => `[self-compact] Context ${pct}%, past the break-even line (necessary, not sufficient). Watch for the next node; ${CRIT.en} Call compact_now only if all three hold.`,
+    nudgeUrgent: pct =>
+      `[self-compact] Context ${pct}%, auto-compaction is close. Unless (1) fails (the current block is unfinished or a question is open; finished work saved to disk and handed over for review counts as closed: list it in pending), call compact_now at the next safe step, no need to wait for a perfect node.`,
+    heavyHarness: pK =>
+      `[self-compact] Context after compaction is still ${pK} (plugins, skills, memory), so a compaction saves little: compact at big phase handoffs or near the urgent tier, not at every small node.`,
     nodeNames: {
       push: 'git push',
       pr: 'PR/MR create, review or merge',
@@ -142,23 +160,24 @@ export const STRINGS: Record<Lang, Strings> = {
       'agent-done': 'subagent returned',
     },
     nodeNudge: (kind, pct) =>
-      `[self-compact] The ${STRINGS.en.nodeNames[kind]} just now looks like a node (context ${pct}%; the plugin has already checked that compacting now is worth it, so do not judge the size again). ` +
+      `[self-compact] The ${STRINGS.en.nodeNames[kind]} just now looks like a node (context ${pct}%, past the break-even line: necessary, not sufficient). ${CRIT.en} ` +
       `Compacting does not stop or interrupt the task: work resumes automatically right after, so "don't stop" instructions are no reason to skip. ` +
-      `Unless this step is unfinished or a question to the user is open (finished work saved to disk and handed over for review counts as closed: list it in pending), call compact_now before this turn ends.`,
+      `If all three hold, call compact_now before this turn ends.`,
     selfCheck: (kind, pct) =>
-      `[self-compact self-check] The last turn showed a node signal (${kind}), context ${pct}%; the plugin has already checked that compacting now is worth it. ` +
+      `[self-compact self-check] The last turn showed a node signal (${kind}), context ${pct}%, past the break-even line: necessary, not sufficient. ${CRIT.en} ` +
       `Compacting does not stop or interrupt the task: work resumes automatically right after, so "don't stop" instructions are no reason to skip. ` +
-      `Unless the current step is unfinished or a question to the user is open (finished work saved to disk and handed over for review counts as closed: list it in pending), call compact_now now (next: what to do next, or how to answer the user's latest message if nothing remains); otherwise reply with just "skip" and end.`,
+      `If all three hold, call compact_now now (next: what to do next, or how to answer the user's latest message if nothing remains); otherwise reply with just "skip: <one-line reason>" and end.`,
     selfCheckWork: pct =>
-      `[self-compact self-check] The last turn finished a block of work, context ${pct}%; the plugin has already checked that compacting now is worth it. ` +
+      `[self-compact self-check] The last turn finished a block of work, context ${pct}%, past the break-even line: necessary, not sufficient. ${CRIT.en} ` +
       `Compacting does not stop or interrupt the task: work resumes automatically right after, so "don't stop" instructions are no reason to skip. ` +
-      `If this block is closed (nothing unfinished, no open question; finished work saved to disk and handed over for review counts as closed, list it in pending; nothing left running), call compact_now now (next: what to do next, or how to answer the user's latest message if nothing remains); otherwise reply with just "skip" and end.`,
+      `If all three hold, call compact_now now (next: what to do next, or how to answer the user's latest message if nothing remains); otherwise reply with just "skip: <one-line reason>" and end.`,
     selfCheckLong: pct =>
-      `[self-compact self-check] Context is ${pct}% and has not been compacted; the plugin has already checked that compacting now is worth it. ` +
+      `[self-compact self-check] Context is ${pct}% and has not been compacted; it is past the break-even line: necessary, not sufficient. ${CRIT.en} ` +
       `Compacting does not stop or interrupt the task: work resumes automatically right after, so "don't stop" instructions are no reason to skip. ` +
-      `Unless the current step is unfinished or a question to the user is open (finished work saved to disk and handed over for review counts as closed: list it in pending), call compact_now now (next: what to do next, or how to answer the user's latest message if nothing remains); otherwise reply with just "skip" and end.`,
+      `If all three hold, call compact_now now (next: what to do next, or how to answer the user's latest message if nothing remains); otherwise reply with just "skip: <one-line reason>" and end.`,
     topicSwitch: pct =>
-      `[self-compact] Context ${pct}%; the plugin has already checked that compacting now is worth it. If this message opens a new block of work (a different topic, or picking the work up again after a pause) and the previous block is closed, call compact_now first (next: the gist of this request, in its own words) and end the turn; compacting does not stop the task, work resumes automatically right after.`,
+      `[self-compact] Context ${pct}%, past the break-even line: necessary, not sufficient. ${CRIT.en} ` +
+      `If this message opens a new block of work (a different topic, or picking the work up again after a pause) and all three hold, call compact_now first (next: the gist of this request, in its own words) and end the turn; compacting does not stop the task, work resumes automatically right after.`,
     stopReason: 'compact queued: ending this turn so it can run, then work continues automatically.',
     preamble:
       'This compaction was started by the model at a task node. Write the summary from the handoff below: ' +
@@ -189,9 +208,9 @@ export const STRINGS: Record<Lang, Strings> = {
     contClosing: 'Continue with the next step; reread the handoff for details.',
     contRecall: sid =>
       `The summary drops detail. When you need an exact error string, value, path or command from before compaction, grep the transcript ~/.claude/projects/*/${sid}.jsonl instead of guessing or redoing the work.`,
-    description: cfg => `Compact your own context at a task node. The call queues: the plugin compacts after the turn ends, then resumes you at \`next\`.
+    description: (cfg, t) => `Compact your own context at a task node. The call queues: the plugin compacts after the turn ends, then resumes you at \`next\`.
 
-Tiers (enforced): <${cfg.floorPct}% denied; ${cfg.floorPct}-${cfg.floorPct + NODE_MARGIN_PCT}% only at a big phase handoff; >=${cfg.floorPct + NODE_MARGIN_PCT}% any clean node. Nudged at >=${Math.max(cfg.nudgeStartPct, cfg.floorPct)}%, urgent at >=${cfg.urgentPct}%.
+Tiers (enforced; compaction leaves ~${k(tiers(cfg, t).p)}): <${tierText(cfg, tiers(cfg, t), "floor")} denied; ${tierText(cfg, tiers(cfg, t), "floor")}-${tierText(cfg, tiers(cfg, t), "node")} only at a big phase handoff; >=${tierText(cfg, tiers(cfg, t), "node")} any clean node, nudged; >=${tierText(cfg, tiers(cfg, t), "urgent")} compact at the next safe step, no perfect node needed.
 
 Good nodes: a verified block end (push, merge, PR, tests green, sent, todos done), topic change, phase handoff, subagent returned, delegation waiting, work saved for review. Anti-nodes: open question, unsent draft, new user rule not yet in standing_orders, mid retry/debug loop, unread agent result.
 
@@ -231,8 +250,11 @@ After "Queued", end the turn now: one line, call no more tools.
     noteFailed: reason =>
       `[self-compact] 排队的 compact_now 未能执行（${reason}），已放弃。若仍需压缩，请在合适的节点用最新状态重新调用。`,
     toastDone: (before, after) => `压缩 ${before}% → ${after}%`,
-    nudgeSoft: pct => `[self-compact] 上下文 ${pct}%，留意下一个节点调用 compact_now。`,
-    nudgeUrgent: pct => `[self-compact] 上下文 ${pct}%，在下一个安全步骤调用 compact_now，不必等完美节点。`,
+    nudgeSoft: pct => `[self-compact] 上下文 ${pct}%，已过回本线（必要条件）。留意下一个节点；${CRIT.zh}三条都满足再调用 compact_now。`,
+    nudgeUrgent: pct =>
+      `[self-compact] 上下文 ${pct}%，很快会触发自动压缩。除非（1）不满足（当前块未收尾或有开着的提问；成果已落盘、交给用户审阅算收尾，写进 pending），否则在下一个安全步骤调用 compact_now，不必等完美节点。`,
+    heavyHarness: pK =>
+      `[self-compact] 压缩后上下文仍有 ${pK}（插件、技能、记忆占用大），压一次省得不多：只在大阶段交接或接近紧急档时压，别每个小节点都压。`,
     nodeNames: {
       push: 'git push',
       pr: 'PR/MR 创建、评审或合并',
@@ -249,22 +271,23 @@ After "Queued", end the turn now: one line, call no more tools.
       'agent-done': '子代理返回',
     },
     nodeNudge: (kind, pct) =>
-      `[self-compact] 刚才的 ${STRINGS.zh.nodeNames[kind]} 像是一个节点（上下文 ${pct}%，插件已确认现在压缩划算，不用再判断大小）。` +
-      `压缩不会打断任务，压完会自动接着做；只要这一步已收尾、没有开着的提问（成果已落盘、交给用户审阅也算收尾，写进 pending），就在本轮结束前调用 compact_now。`,
+      `[self-compact] 刚才的 ${STRINGS.zh.nodeNames[kind]} 像是一个节点（上下文 ${pct}%，已过回本线，这是压缩的必要条件而非充分条件）。${CRIT.zh}` +
+      `压缩不会打断任务，压完会自动接着做；三条都满足就在本轮结束前调用 compact_now。`,
     selfCheck: (kind, pct) =>
-      `[self-compact 自检] 上一轮出现了节点信号（${kind}），上下文 ${pct}%，插件已确认现在压缩划算。` +
+      `[self-compact 自检] 上一轮出现了节点信号（${kind}），上下文 ${pct}%，已过回本线，这是压缩的必要条件而非充分条件。${CRIT.zh}` +
       `压缩不会打断任务，压完会自动接着做。` +
-      `只要当前步骤已收尾、没有开着的提问（成果已落盘、交给用户审阅也算收尾，写进 pending），现在就调用 compact_now（next 写接下来要做的事；没有就写怎么回应用户最新的消息）；否则只回复「不压」并结束。`,
+      `三条都满足就现在调用 compact_now（next 写接下来要做的事；没有就写怎么回应用户最新的消息）；否则只回复 skip: <一句理由> 并结束。`,
     selfCheckWork: pct =>
-      `[self-compact 自检] 上一轮做完了一整块工作，上下文 ${pct}%，插件已确认现在压缩划算。` +
+      `[self-compact 自检] 上一轮做完了一整块工作，上下文 ${pct}%，已过回本线，这是压缩的必要条件而非充分条件。${CRIT.zh}` +
       `压缩不会打断任务，压完会自动接着做。` +
-      `如果这一块已经收尾（没有未完成的步骤、没有开着的提问；成果已落盘、交给用户审阅也算收尾，写进 pending、没有还在跑的任务），现在就调用 compact_now（next 写接下来要做的事；没有就写怎么回应用户最新的消息）；否则只回复「不压」并结束。`,
+      `三条都满足就现在调用 compact_now（next 写接下来要做的事；没有就写怎么回应用户最新的消息）；否则只回复 skip: <一句理由> 并结束。`,
     selfCheckLong: pct =>
-      `[self-compact 自检] 上下文已到 ${pct}%，一直没有压缩，插件已确认现在压缩划算。` +
+      `[self-compact 自检] 上下文已到 ${pct}%，一直没有压缩，已过回本线，这是压缩的必要条件而非充分条件。${CRIT.zh}` +
       `压缩不会打断任务，压完会自动接着做。` +
-      `只要当前步骤已收尾、没有开着的提问（成果已落盘、交给用户审阅也算收尾，写进 pending），现在就调用 compact_now（next 写接下来要做的事；没有就写怎么回应用户最新的消息）；否则只回复「不压」并结束。`,
+      `三条都满足就现在调用 compact_now（next 写接下来要做的事；没有就写怎么回应用户最新的消息）；否则只回复 skip: <一句理由> 并结束。`,
     topicSwitch: pct =>
-      `[self-compact] 上下文 ${pct}%，插件已确认现在压缩划算。如果这条消息开启一个新工作块（换了话题，或隔了一阵重新接着做）而上一块已经收尾，先调用 compact_now（next 写这条需求的原文要点）再结束本轮；压缩不会打断任务，压完会自动接着做。`,
+      `[self-compact] 上下文 ${pct}%，已过回本线，这是压缩的必要条件而非充分条件。${CRIT.zh}` +
+      `如果这条消息开启一个新工作块（换了话题，或隔了一阵重新接着做）且三条都满足，先调用 compact_now（next 写这条需求的原文要点）再结束本轮；压缩不会打断任务，压完会自动接着做。`,
     stopReason: 'compact 已排队：先结束本轮以执行压缩，随后自动续接。',
     preamble:
       '这是模型在任务节点上主动发起的压缩，请按下面的交接单写摘要：' +
@@ -295,9 +318,9 @@ After "Queued", end the turn now: one line, call no more tools.
     contClosing: '先按下一步继续；需要细节回读交接单。',
     contRecall: sid =>
       `摘要会丢细节。需要压缩前的报错原文、数值、路径或命令时，grep transcript ~/.claude/projects/*/${sid}.jsonl，不要猜，也不要重做。`,
-    description: cfg => `在任务节点上压缩你自己的上下文。调用只排队：本轮结束后插件自动压缩，并发续接消息让你按 next 继续。
+    description: (cfg, t) => `在任务节点上压缩你自己的上下文。调用只排队：本轮结束后插件自动压缩，并发续接消息让你按 next 继续。
 
-门槛（插件强制，不够会被拒）：<${cfg.floorPct}% 拒绝；${cfg.floorPct}-${cfg.floorPct + NODE_MARGIN_PCT}% 只在大阶段交接压（spec→plan、plan→实现、MR 创建→review）且下一阶段明显够长；>=${cfg.floorPct + NODE_MARGIN_PCT}% 任何干净节点可压。>=${Math.max(cfg.nudgeStartPct, cfg.floorPct)}% 未压插件会提醒；>=${cfg.urgentPct}% 在下一个安全步骤就压，不必等完美节点。
+门槛（插件强制，压缩后约 ${k(tiers(cfg, t).p)}，不够会被拒）：<${tierText(cfg, tiers(cfg, t), "floor")} 拒绝；${tierText(cfg, tiers(cfg, t), "floor")}-${tierText(cfg, tiers(cfg, t), "node")} 只在大阶段交接压（spec→plan、plan→实现、MR 创建→review）且下一阶段明显够长；>=${tierText(cfg, tiers(cfg, t), "node")} 任何干净节点可压，插件从此提醒；>=${tierText(cfg, tiers(cfg, t), "urgent")} 在下一个安全步骤就压，不必等完美节点。
 
 好节点：一块工作收尾并已验证（push、合并、PR、测试通过、消息已发、待办全完成），转新需求；状态刚落盘；用户换话题；阶段交接；子代理返回；任务委派出去进入等待（pending 写明每个任务及回报方式）；成果落盘待用户审阅；用户说"等会 compact/继续/下一个"。
 
@@ -325,6 +348,15 @@ const S = (): Strings => STRINGS[state.cfg.language]
 
 const k = (n: number): string => `${Math.round(n / 1000)}k`
 
+export const SKIP_REASON_CAP = 200
+
+/** Reason from a `skip: <reason>` self-check reply; undefined for a bare skip or any other text. */
+export function parseSkipReason(answer: string | undefined): string | undefined {
+  const m = /^\s*skip\s*[:：]\s*([\s\S]*)$/i.exec(answer ?? '')
+  const reason = m?.[1]?.trim().slice(0, SKIP_REASON_CAP)
+  return reason === undefined || reason === '' ? undefined : reason
+}
+
 /** Context fill, 0-100 with one decimal; undefined before the first request. */
 export function pctOf(u: Usage): number | undefined {
   if (u.tokens === undefined || !u.window) return undefined
@@ -339,25 +371,72 @@ function contextOf(u: Usage): Usage {
   return { tokens: u.tokens ?? state.lastStepTokens, window: u.window }
 }
 
-/** Smallest context worth compacting: the percent floor, or the size that still frees minSavingK tokens. */
-export function floorTokens(window: number, baseline: number | undefined, cfg: Config): number {
-  return Math.max((cfg.floorPct / 100) * window, (baseline ?? DEFAULT_BASELINE) + POST_COMPACT_EXTRA + cfg.minSavingK * 1_000)
+// ---- thresholds ----
+
+export const DEPRECATED_KEYS = ['minSavingK', 'nudgeStartPct', 'urgentPct'] as const
+
+/** Old option keys that are still set; accepted but ignored. */
+export function deprecatedKeys(options: Record<string, unknown> | undefined): string[] {
+  const o = options ?? {}
+  return DEPRECATED_KEYS.filter((key) => o[key] !== undefined)
+}
+
+/** Average context per call over n calls when each compaction costs `fixedCost` and leaves `p`: (10*fixedCost + n*p) / (n-1). */
+export function callsToTokens(n: number, p: number, fixedCost: number): number {
+  return (10 * fixedCost + n * p) / (n - 1)
+}
+
+export type Thresholds = { p: number; window: number; floor: number; node: number; work: number; urgent: number; heavy: boolean }
+
+// A compaction must free at least this much, so no tier sits at or below the post-compact size.
+const MIN_GAIN_K = 25
+
+/** Tier sizes in tokens from the post-compact size p: capped at urgent (80% of the window at most), then raised to p + MIN_GAIN_K. */
+export function thresholds(p: number, window: number, cfg: Config): Thresholds {
+  const cost = cfg.compactCostK * 1_000
+  const c = (n: number) => callsToTokens(n, p, cost)
+  const minTier = p + MIN_GAIN_K * 1_000
+  const urgent = Math.min(cfg.urgentK * 1_000, 0.8 * window)
+  const tier = (v: number) => Math.max(Math.min(v, urgent), minTier)
+  return {
+    p,
+    window,
+    floor: tier(Math.max(c(cfg.floorCalls), (cfg.floorPct / 100) * window)),
+    node: tier(c(cfg.nodeCalls)),
+    work: tier(c(cfg.workCalls)),
+    urgent: tier(urgent),
+    heavy: c(cfg.workCalls) >= cfg.urgentK * 1_000,
+  }
+}
+
+/** Tiers for the current post-compact size p: this session's sample, else the learned profile, else baseline + 25k. */
+export function currentThresholds(window: number): Thresholds {
+  return thresholds(pickP(state.profile, state.cwd ?? '', state.sessionP, state.baseline), window, state.cfg)
+}
+
+// Window assumed where the engine has not reported one (the tool description at session start).
+const REF_WINDOW = 1_000_000
+const tiers = (cfg: Config, t?: Thresholds): Thresholds => t ?? thresholds(pickP(state.profile, state.cwd ?? '', state.sessionP, state.baseline), REF_WINDOW, cfg)
+
+/** "213k (21%)", full-width brackets in Chinese. */
+const tierText = (cfg: Config, t: Thresholds, tier: 'floor' | 'node' | 'urgent'): string => {
+  const pc = Math.round((t[tier] / t.window) * 100)
+  return cfg.language === 'zh' ? `${k(t[tier])}（${pc}%）` : `${k(t[tier])} (${pc}%)`
 }
 
 export type GateResult = { ok: true; pct: number } | { ok: false; reason: string; pct?: number }
 
-export function gate(u: Usage, baseline: number | undefined, cfg: Config): GateResult {
+export function gate(u: Usage, t: Thresholds, lang: Lang): GateResult {
   const pct = pctOf(u)
   if (pct === undefined || u.tokens === undefined || !u.window) {
-    return { ok: false, reason: STRINGS[cfg.language].gateNoUsage }
+    return { ok: false, reason: STRINGS[lang].gateNoUsage }
   }
-  const need = floorTokens(u.window, baseline, cfg)
-  if (u.tokens < need) {
-    const needPct = Math.round((need / u.window) * 1000) / 10
+  if (u.tokens < t.floor) {
+    const needPct = Math.round((t.floor / u.window) * 1000) / 10
     return {
       ok: false,
       pct,
-      reason: STRINGS[cfg.language].gateBelow(pct, k(u.tokens), needPct, k(need)),
+      reason: STRINGS[lang].gateBelow(pct, k(u.tokens), needPct, k(t.floor)),
     }
   }
   return { ok: true, pct }
@@ -365,14 +444,13 @@ export function gate(u: Usage, baseline: number | undefined, cfg: Config): GateR
 
 export type NudgeLevel = 'none' | 'soft' | 'urgent'
 
-/** Nudge from `max(start, floor)`, again only after each further step; urgent from urgentPct. */
-export function nudgeLevel(pct: number, lastNudgedPct: number | undefined, floorPct: number, cfg: Config): NudgeLevel {
-  const start = Math.max(cfg.nudgeStartPct, floorPct)
-  if (pct < start) return 'none'
-  const isUrgent = pct >= cfg.urgentPct
-  if (lastNudgedPct !== undefined && pct < lastNudgedPct + cfg.nudgeStepPct) {
+/** Nudge from the node tier (never below the floor), again only after each further `stepTokens`; urgent from the urgent tier. */
+export function nudgeLevel(tokens: number, lastNudgedTokens: number | undefined, t: Thresholds, stepTokens: number): NudgeLevel {
+  if (tokens < Math.max(t.node, t.floor)) return 'none'
+  const isUrgent = tokens >= t.urgent
+  if (lastNudgedTokens !== undefined && tokens < lastNudgedTokens + stepTokens) {
     // Crossing into urgent territory escalates at once.
-    if (!(isUrgent && lastNudgedPct < cfg.urgentPct)) return 'none'
+    if (!(isUrgent && lastNudgedTokens < t.urgent)) return 'none'
   }
   return isUrgent ? 'urgent' : 'soft'
 }
@@ -381,6 +459,12 @@ const num = (v: unknown, d: number): number => {
   const n = Number(v)
   return v === undefined || v === '' || !Number.isFinite(n) ? d : n
 }
+
+// Lower bounds that keep the tier arithmetic sane.
+const MIN_URGENT_K = 50
+const MIN_COST_K = 1
+
+const calls = (v: unknown, d: number): number => Math.max(2, num(v, d))
 
 /** Booleans default on; "false" and "0" turn them off. */
 const flag = (v: unknown): boolean => v === undefined || !(v === false || v === 'false' || v === '0')
@@ -391,10 +475,12 @@ export function configFrom(options: Record<string, unknown> | undefined): Config
   const rs = o.releaseStopHooks
   return {
     floorPct: num(o.floorPct, DEFAULTS.floorPct),
-    minSavingK: num(o.minSavingK, DEFAULTS.minSavingK),
-    nudgeStartPct: num(o.nudgeStartPct, DEFAULTS.nudgeStartPct),
+    floorCalls: calls(o.floorCalls, DEFAULTS.floorCalls),
+    nodeCalls: calls(o.nodeCalls, DEFAULTS.nodeCalls),
+    workCalls: calls(o.workCalls, DEFAULTS.workCalls),
     nudgeStepPct: num(o.nudgeStepPct, DEFAULTS.nudgeStepPct),
-    urgentPct: num(o.urgentPct, DEFAULTS.urgentPct),
+    urgentK: Math.max(MIN_URGENT_K, num(o.urgentK, DEFAULTS.urgentK)),
+    compactCostK: Math.max(MIN_COST_K, num(o.compactCostK, DEFAULTS.compactCostK)),
     enabled: en === undefined ? true : !(en === false || en === 'false' || en === '0'),
     releaseStopHooks: rs === true || rs === 'true' || rs === '1',
     autoNodes: flag(o.autoNodes),
@@ -672,6 +758,14 @@ type State = {
   interactive: boolean
   pending?: Pending
   baseline?: number
+  cwd?: string
+  profile: Profile
+  // This session's latest post-compact size, and whether the next main step is to be sampled for it.
+  sessionP?: number
+  awaitingPSample: boolean
+  heavyNoted: boolean
+  /** Last window read by usageOf; the describe hook cannot read usage itself (breakdown re-enters it). Survives resets: the window is not per-conversation. */
+  window?: number
   // Context tokens of the last main-loop request, for when the engine cannot measure.
   lastStepTokens?: number
   seq: number
@@ -688,7 +782,7 @@ type State = {
   notes: string[]
   // Latest nudge line waiting for a carrier; replaced by a newer one, dropped if a request is queued.
   nudge?: string
-  lastNudgedPct?: number
+  lastNudgedTokens?: number
   // Stop-hook release: a Stop we forced to end the turn, and whether that end failed to compact.
   forcing: boolean
   lastEndForced: boolean
@@ -710,6 +804,9 @@ type State = {
 // One state per loaded module; a session start begins afresh.
 export const state: State = {
   cfg: { ...DEFAULTS },
+  profile: { byProject: {} },
+  awaitingPSample: false,
+  heavyNoted: false,
   interactive: false,
   seq: 0,
   busy: false,
@@ -764,6 +861,8 @@ type LogLine = {
   afterPct?: number
   durationMs?: number
   kind?: string
+  pSample?: number
+  p?: number
 }
 
 // $.fs has no append: each write is read-modify-write, so writers queue behind one another.
@@ -800,6 +899,92 @@ async function dataRoot($: Dollar): Promise<string | undefined> {
   return home === undefined || home === '' ? undefined : `${home.replace(/[\\/]$/, '')}/.claude/self-compact`
 }
 
+// ---- profile ----
+
+export type PEst = { p: number; n: number; out?: { dir: 1 | -1; samples: number[] } }
+export type SkillPrior = { stubbed: number; reloadedAfterStub: number; hot: number; usedAfterHot: number }
+export type Profile = { global?: PEst; byProject: Record<string, PEst>; skills?: Record<string, SkillPrior> }
+
+const OUTLIER_FRAC = 0.5
+const OUTLIER_RESET = 3
+
+/** Folds one post-compact size into the estimate: EWMA 0.3, outliers at 0.1; three same-direction outliers re-seed it. */
+export function learnP(est: PEst | undefined, sample: number): PEst {
+  if (est === undefined) return { p: sample, n: 1 }
+  const dev = sample - est.p
+  if (Math.abs(dev) <= OUTLIER_FRAC * est.p) {
+    return { p: Math.round(est.p + 0.3 * dev), n: est.n + 1 }
+  }
+  const dir: 1 | -1 = dev > 0 ? 1 : -1
+  const samples = est.out?.dir === dir ? [...est.out.samples, sample] : [sample]
+  if (samples.length >= OUTLIER_RESET) {
+    return { p: Math.round(samples.reduce((a, b) => a + b, 0) / samples.length), n: samples.length }
+  }
+  return { p: Math.round(est.p + 0.1 * dev), n: est.n + 1, out: { dir, samples } }
+}
+
+const MIN_N = 3
+
+/** Post-compact size to plan with: this session's sample, else the project's, else the global, else baseline + 25k. */
+export function pickP(profile: Profile, cwd: string, sessionSample: number | undefined, baseline: number | undefined): number {
+  if (sessionSample !== undefined) return sessionSample
+  const proj = profile.byProject[cwd]
+  if (proj !== undefined && proj.n >= MIN_N) return proj.p
+  if (profile.global !== undefined && profile.global.n >= MIN_N) return profile.global.p
+  return (baseline ?? DEFAULT_BASELINE) + 25_000
+}
+
+const validEst = (e: unknown): e is PEst =>
+  typeof e === 'object' && e !== null && Number.isFinite((e as PEst).p) && (e as PEst).p > 0 && Number.isFinite((e as PEst).n)
+
+export function parseProfile(text: string | undefined): Profile {
+  try {
+    const o = JSON.parse(text ?? '') as unknown
+    if (typeof o !== 'object' || o === null || Array.isArray(o)) return { byProject: {} }
+    const r = o as Partial<Profile>
+    const raw = typeof r.byProject === 'object' && r.byProject !== null && !Array.isArray(r.byProject) ? r.byProject : {}
+    const byProject: Record<string, PEst> = {}
+    for (const [key, est] of Object.entries(raw)) if (key !== '__proto__' && validEst(est)) byProject[key] = est
+    const { global: g, ...rest } = r
+    return validEst(g) ? { ...rest, global: g, byProject } : { ...rest, byProject }
+  } catch {
+    return { byProject: {} }
+  }
+}
+
+/** The saved profile; an absent or unreadable file reads as empty. */
+async function loadProfile($: Dollar): Promise<Profile> {
+  try {
+    const home = await dataRoot($)
+    if (home === undefined) return { byProject: {} }
+    const path = `${home}/profile.json`
+    const text = (await $.fs.exists(path)) ? await $.fs.read(path) : undefined
+    return parseProfile(typeof text === 'string' ? text : undefined)
+  } catch {
+    return { byProject: {} }
+  }
+}
+
+/** Re-reads profile.json, applies `mutate`, writes it back; queued behind log writes, never throws. An unreadable file is left alone. */
+export function saveProfile($: Dollar, mutate: (p: Profile) => void): Promise<void> {
+  const run = async (): Promise<void> => {
+    try {
+      const home = await dataRoot($)
+      if (home === undefined) return
+      const path = `${home}/profile.json`
+      const prev = (await $.fs.exists(path)) ? await $.fs.read(path) : undefined
+      if (prev !== undefined && typeof prev !== 'string') return
+      const profile = parseProfile(prev)
+      mutate(profile)
+      await $.fs.write(path, JSON.stringify(profile))
+    } catch {
+      // Learning is best effort.
+    }
+  }
+  logTail = logTail.then(run, run)
+  return logTail
+}
+
 /** The session's opening request, saved on first sight: after a compaction the transcript the engine returns no longer starts with it. */
 async function sessionIntent($: Dollar, path: string, msgs: readonly { role: string; text: string }[]): Promise<string | undefined> {
   try {
@@ -832,8 +1017,8 @@ async function handleCompact($: Dollar, input: Record<string, unknown>, isSub: b
   if (state.lastTool === 'AskUserQuestion') {
     return deny(S().denyAskedUser, 'asked-user', node)
   }
-  const usage = contextOf((await $.session.usage()).context)
-  const g = gate(usage, state.baseline, state.cfg)
+  const usage = await usageOf($)
+  const g = gate(usage, currentThresholds(usage.window ?? REF_WINDOW), state.cfg.language)
   if (!g.ok) return deny(g.reason, 'gate', node, g.pct)
 
   const root = await dataRoot($)
@@ -936,10 +1121,10 @@ async function runCompact($: Dollar): Promise<void> {
   state.compacting = true
   try {
     const started = await $.clock.now()
-    const ctx = contextOf((await $.session.usage()).context)
+    const ctx = await usageOf($)
     const before = pctOf(ctx)
     // Auto-compact got there first: the request is moot, but work still resumes.
-    if (ctx.tokens !== undefined && !gate(ctx, state.baseline, state.cfg).ok) {
+    if (ctx.tokens !== undefined && !gate(ctx, currentThresholds(ctx.window ?? REF_WINDOW), state.cfg.language).ok) {
       await dropPending($, p, { result: 'preempted', beforePct: p.requestedPct, afterPct: before })
       state.compacting = false
       sendContinuation($, p, p.requestedPct, before)
@@ -978,7 +1163,8 @@ async function runCompact($: Dollar): Promise<void> {
         : pctOf((await $.session.usage()).context)
     const durationMs = (await $.clock.now()) - started
     await dropPending($, p, { result: 'done', beforePct: before, afterPct: after, durationMs })
-    state.lastNudgedPct = undefined
+    state.lastNudgedTokens = undefined
+    state.awaitingPSample = true
     // The old step total is stale; the result's count stands in until the next step.
     state.lastStepTokens = tokensAfter
     state.checkedAt.clear()
@@ -998,25 +1184,69 @@ type StepUsage = { input_tokens: number; cache_read_input_tokens: number; cache_
 // The first request of a fresh session carries little more than the opening prompt; a resumed transcript is far longer and would inflate the baseline.
 export const BASELINE_MAX_MESSAGES = 3
 
+/** Context reading against the window the engine compacts at ($.session.usage breakdown.maxTokens, else context.window). */
+async function usageOf($: Dollar): Promise<Usage> {
+  const { context } = await $.session.usage({ breakdown: 'summary' })
+  const max = context.breakdown?.maxTokens
+  const window = typeof max === 'number' && max > 0 ? max : context.window
+  if (window) state.window = window
+  return contextOf({ tokens: context.tokens, window })
+}
+
+/** Registers compact_now; the `tool.describe` hook keeps its text current. */
+async function registerTool($: Dollar): Promise<void> {
+  await $.tool.register({
+    name: TOOL,
+    description: S().description(state.cfg, currentThresholds(state.window ?? REF_WINDOW)),
+    inputSchema: inputSchema(S()),
+    isDeferred: false,
+  })
+}
+
+/** Folds the first main step after a compaction into the profile and the session's P. */
+async function learnSample($: Dollar, total: number): Promise<void> {
+  state.awaitingPSample = false
+  state.sessionP = total
+  const cwd = state.cwd
+  const fold = (p: Profile) => {
+    p.global = learnP(p.global, total)
+    if (cwd !== undefined) p.byProject[cwd] = learnP(p.byProject[cwd], total)
+  }
+  fold(state.profile)
+  await saveProfile($, fold)
+  await logLine($, { result: 'p-sample', pSample: total, p: pickP(state.profile, cwd ?? '', state.sessionP, state.baseline) })
+  // The cached description is rewritten at the next compaction (prompt cache kept).
+  try {
+    $.ui.invalidate('tool.describe')
+  } catch {
+    // The old description stays until the next session.
+  }
+}
+
 async function onMainStep($: Dollar, u: StepUsage, messageCount: number): Promise<void> {
   const total = u.input_tokens + u.cache_read_input_tokens + u.cache_creation_input_tokens
-  // All-zero usage (a failed or empty response) measures nothing; keep the last reading.
-  if (total === 0) return
+  // Zero or garbage usage (a failed or empty response) measures nothing; keep the last reading.
+  if (!Number.isFinite(total) || total <= 0) return
   state.lastStepTokens = total
   if (state.baseline === undefined && messageCount <= BASELINE_MAX_MESSAGES) state.baseline = total
+  if (state.awaitingPSample) await learnSample($, total)
   if (!state.interactive || !state.cfg.enabled || (await $.env.get('DISABLE_COMPACT')) === '1') return
   if (state.pending !== undefined || state.compacting) return
-  const window = (await $.session.usage()).context.window
-  const pct = pctOf({ tokens: total, window })
-  if (pct === undefined || !window) return
-  const floorPct = (floorTokens(window, state.baseline, state.cfg) / window) * 100
-  const level = nudgeLevel(pct, state.lastNudgedPct, floorPct, state.cfg)
+  const window = (await usageOf($)).window
+  if (!window) return
+  const t = currentThresholds(window)
+  if (t.heavy && !state.heavyNoted) {
+    state.heavyNoted = true
+    state.notes.push(S().heavyHarness(k(t.p)))
+  }
+  const level = nudgeLevel(total, state.lastNudgedTokens, t, (state.cfg.nudgeStepPct / 100) * window)
   if (level === 'none') {
     // Back under the start line: something compacted, so count afresh.
-    if (pct < Math.max(state.cfg.nudgeStartPct, floorPct)) state.lastNudgedPct = undefined
+    if (total < Math.max(t.node, t.floor)) state.lastNudgedTokens = undefined
     return
   }
-  state.lastNudgedPct = pct
+  state.lastNudgedTokens = total
+  const pct = pctOf({ tokens: total, window }) ?? 0
   state.nudge = level === 'urgent' ? S().nudgeUrgent(pct) : S().nudgeSoft(pct)
 }
 
@@ -1044,7 +1274,10 @@ function resetConversation(): void {
   state.timer = undefined
   state.notes = []
   state.nudge = undefined
-  state.lastNudgedPct = undefined
+  state.lastNudgedTokens = undefined
+  state.sessionP = undefined
+  state.awaitingPSample = false
+  state.heavyNoted = false
   state.forcing = false
   state.lastEndForced = false
   state.forceFailed = false
@@ -1065,21 +1298,20 @@ function resetConversation(): void {
 
 // ---- autonomous triggers: node nudge, turn-end self-check, topic switch ----
 
-// A weak node signal and a topic-switch hint need this much room above the floor.
-export const NODE_MARGIN_PCT = 5
 // One self-check per node kind per this much context growth.
 export const CHECK_STEP_PCT = 5
 
 /** Context state for the autonomous triggers; undefined while they must stay quiet. */
-async function triggerGate($: Dollar): Promise<{ pct: number; floorPct: number } | undefined> {
+async function triggerGate($: Dollar): Promise<{ pct: number; tokens: number; t: Thresholds } | undefined> {
   if (!state.cfg.autoNodes || !state.cfg.enabled || !state.interactive) return undefined
   if (state.pending !== undefined || state.compacting) return undefined
   if ((await $.env.get('DISABLE_COMPACT')) === '1') return undefined
-  const u = contextOf((await $.session.usage()).context)
-  const g = gate(u, state.baseline, state.cfg)
-  if (!g.ok || !u.window) return undefined
-  const floorPct = (floorTokens(u.window, state.baseline, state.cfg) / u.window) * 100
-  return { pct: g.pct, floorPct }
+  const u = await usageOf($)
+  if (u.tokens === undefined || !u.window) return undefined
+  const t = currentThresholds(u.window)
+  const g = gate(u, t, state.cfg.language)
+  if (!g.ok) return undefined
+  return { pct: g.pct, tokens: u.tokens, t }
 }
 
 /** After a main-session tool returns: record the node signal and, at most once per turn, build the nudge line. */
@@ -1091,7 +1323,7 @@ async function onNodeSignal($: Dollar, e: Record<string, unknown>, r: unknown): 
   if (state.nodeNudged) return undefined
   const g = await triggerGate($)
   if (g === undefined) return undefined
-  if (sig.strength === 'weak' && g.pct < g.floorPct + NODE_MARGIN_PCT) return undefined
+  if (sig.strength === 'weak' && g.tokens < g.t.node) return undefined
   state.nodeNudged = true
   await logLine($, { result: 'node-nudge', kind: sig.kind, pct: g.pct })
   return S().nodeNudge(sig.kind, g.pct)
@@ -1107,17 +1339,16 @@ async function scheduleSelfCheck($: Dollar): Promise<void> {
   const g = await triggerGate($)
   if (g === undefined) return
   const sig = state.turnSignal
-  const weakOk = g.pct >= g.floorPct + NODE_MARGIN_PCT
-  const workStart = Math.max(g.floorPct, state.cfg.nudgeStartPct - NODE_MARGIN_PCT)
+  const weakOk = g.tokens >= g.t.node
   let key: string
   let text: string
   if (sig !== undefined && (sig.strength === 'strong' || weakOk)) {
     key = sig.kind
     text = S().selfCheck(sig.kind, g.pct)
-  } else if (state.turnToolCalls >= WORK_TURN_MIN_CALLS && g.pct >= workStart) {
+  } else if (state.turnToolCalls >= WORK_TURN_MIN_CALLS && g.tokens >= g.t.work) {
     key = 'work'
     text = S().selfCheckWork(g.pct)
-  } else if (g.pct >= state.cfg.nudgeStartPct) {
+  } else if (g.tokens >= g.t.node) {
     key = 'pct'
     text = S().selfCheckLong(g.pct)
   } else return
@@ -1137,7 +1368,7 @@ async function fireSelfCheck($: Dollar, key: string, text: string): Promise<void
   // The context may have shrunk (auto-compact) while the debounce ran.
   if ((await triggerGate($)) === undefined) return
   state.awaitingCheck = true
-  const pct = pctOf(contextOf((await $.session.usage()).context))
+  const pct = pctOf(await usageOf($))
   await logLine($, { result: 'self-check', kind: key === 'pct' ? undefined : key, pct })
   // Not awaited: submit resolves only once the next turn starts.
   void Promise.resolve($.prompt.submit({ text })).catch(() => {})
@@ -1155,13 +1386,28 @@ export const register: Register = (on, options) => {
   on('session.start', async ($, e, next) => {
     state.interactive = e.isInteractive
     resetConversation()
-    await $.tool.register({
-      name: TOOL,
-      description: S().description(state.cfg),
-      inputSchema: inputSchema(S()),
-      isDeferred: false,
-    })
+    state.cwd = e.cwd
+    state.profile = await loadProfile($)
+    const stale = deprecatedKeys(options as Record<string, unknown> | undefined)
+    if (stale.length > 0) await logLine($, { result: 'deprecated', reason: stale.join(',') })
+    await registerTool($)
     return next(e)
+  })
+
+  let describing = false
+
+  // The engine caches the answer until `$.ui.invalidate('tool.describe')`; a changed one reaches the model at the next compaction.
+  on('tool.describe', { tool: TOOL_FULL }, async ($, e, next) => {
+    // A nested describe (rendering schemas while this one runs) passes through.
+    if (describing) return next(e)
+    describing = true
+    try {
+      const t = currentThresholds(state.window ?? REF_WINDOW)
+      await logLine($, { result: 'tool-describe', p: t.p })
+      return { ...(await next(e)), description: S().description(state.cfg, t) }
+    } finally {
+      describing = false
+    }
   })
 
   on('session.end', async ($, e, next) => {
@@ -1206,7 +1452,13 @@ export const register: Register = (on, options) => {
     }
     if (state.checkTurn) {
       state.checkTurn = false
-      if (!e.isAborted) await logLine($, { result: state.compactCalled ? 'self-check:compacted' : 'self-check:declined' })
+      if (!e.isAborted) {
+        if (state.compactCalled) await logLine($, { result: 'self-check:compacted' })
+        else {
+          const reason = parseSkipReason(e.answer)
+          await logLine($, reason === undefined ? { result: 'self-check:declined' } : { result: 'self-check:declined', reason })
+        }
+      }
     }
     if (!e.isAborted) {
       try {
@@ -1277,6 +1529,7 @@ export const register: Register = (on, options) => {
     if (e.agentId === undefined && typeof r.skip !== 'string') {
       const after = (r as { tokensAfter?: unknown }).tokensAfter
       state.lastStepTokens = typeof after === 'number' && after > 0 ? after : undefined
+      state.awaitingPSample = true
     }
     return r
   })

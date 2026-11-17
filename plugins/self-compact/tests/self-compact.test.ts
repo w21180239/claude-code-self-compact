@@ -2,6 +2,14 @@ import { expect, mock, test } from 'claude-code/testing'
 import type { TestBody } from 'claude-code/testing'
 import {
   DEFAULTS,
+  STRINGS,
+  callsToTokens,
+  learnP,
+  pickP,
+  parseProfile,
+  saveProfile,
+  deprecatedKeys,
+  thresholds,
   buildInstructions,
   continuationText,
   configFrom,
@@ -15,56 +23,103 @@ import {
   TOOL_FULL,
   validateHandoff,
 } from '../hooks/register'
-import type { Handoff } from '../hooks/register'
+import type { Handoff, PEst } from '../hooks/register'
 
-test('gate: below the min-saving floor denies', () => {
-  // With a 65k baseline the floor is 65k + 20k + 40k = 125k.
-  const g = gate({ tokens: 120_000, window: 1_000_000 }, 65_000, DEFAULTS)
+const TH = (p: number, window = 1_000_000, cfg = DEFAULTS) => thresholds(p, window, cfg)
+
+test('gate: below the call-count floor denies, at it opens', () => {
+  // P = 90k: C(20) = (1.05M + 20*90k) / 19 = 150k.
+  const g = gate({ tokens: 140_000, window: 1_000_000 }, TH(90_000), 'en')
   expect(g.ok).toBe(false)
-  if (!g.ok) {
-    expect(g.reason).toContain('12')
-    expect(g.reason).toContain('12.5')
-  }
-})
-
-test('gate: minSavingK binds above the percent floor', () => {
-  expect(gate({ tokens: 120_000, window: 1_000_000 }, 65_000, DEFAULTS).ok).toBe(false)
-  expect(gate({ tokens: 130_000, window: 1_000_000 }, 65_000, DEFAULTS)).toEqual({ ok: true, pct: 13 })
-})
-
-test('gate: missing baseline uses 65k', () => {
-  expect(gate({ tokens: 120_000, window: 1_000_000 }, undefined, DEFAULTS).ok).toBe(false)
-  expect(gate({ tokens: 130_000, window: 1_000_000 }, undefined, DEFAULTS)).toEqual({ ok: true, pct: 13 })
+  if (!g.ok) expect(g.reason).toContain('15%')
+  if (!g.ok) expect(g.reason).toContain('150k')
+  expect(gate({ tokens: 150_000, window: 1_000_000 }, TH(90_000), 'en')).toEqual({ ok: true, pct: 15 })
 })
 
 test('gate: missing usage denies', () => {
-  const g = gate({}, 65_000, DEFAULTS)
+  const g = gate({}, TH(90_000), 'en')
   expect(g.ok).toBe(false)
-  expect(gate({ tokens: 130_000 }, 65_000, DEFAULTS).ok).toBe(false)
+  expect(gate({ tokens: 130_000 }, TH(90_000), 'en').ok).toBe(false)
 })
 
-test('gate: a 200k window opens at baseline + 60k', () => {
-  expect(gate({ tokens: 120_000, window: 200_000 }, 65_000, DEFAULTS).ok).toBe(false)
-  expect(gate({ tokens: 130_000, window: 200_000 }, 65_000, DEFAULTS)).toEqual({ ok: true, pct: 65 })
+test('gate: a 200k window keeps the same floor in tokens', () => {
+  const t = TH(90_000, 200_000)
+  expect(gate({ tokens: 140_000, window: 200_000 }, t, 'en').ok).toBe(false)
+  expect(gate({ tokens: 150_000, window: 200_000 }, t, 'en')).toEqual({ ok: true, pct: 75 })
 })
 
-test('gate: floorPct still binds on a 1M window', () => {
-  // A 20k baseline leaves 80k, below 10% of 1M.
-  expect(gate({ tokens: 90_000, window: 1_000_000 }, 20_000, DEFAULTS).ok).toBe(false)
-  expect(gate({ tokens: 100_000, window: 1_000_000 }, 20_000, DEFAULTS).ok).toBe(true)
+test('gate: floorPct is an extra lower bound on a 1M window', () => {
+  const cfg = { ...DEFAULTS, floorPct: 20 }
+  const t = TH(65_000, 1_000_000, cfg)
+  expect(gate({ tokens: 190_000, window: 1_000_000 }, t, 'en').ok).toBe(false)
+  expect(gate({ tokens: 200_000, window: 1_000_000 }, t, 'en').ok).toBe(true)
 })
 
-test('nudgeLevel: 19 none, 20 soft, 22 after 20 none, 25 after 20 soft, 36 urgent', () => {
-  expect(nudgeLevel(19, undefined, 10, DEFAULTS)).toBe('none')
-  expect(nudgeLevel(20, undefined, 10, DEFAULTS)).toBe('soft')
-  expect(nudgeLevel(22, 20, 10, DEFAULTS)).toBe('none')
-  expect(nudgeLevel(25, 20, 10, DEFAULTS)).toBe('soft')
-  expect(nudgeLevel(36, undefined, 10, DEFAULTS)).toBe('urgent')
+test('nudgeLevel: starts at the node tier, steps by nudgeStepPct, urgent at 350k', () => {
+  // P = 90k on 1M: node C(10) = 216.7k.
+  const t = TH(90_000)
+  const step = 50_000
+  expect(nudgeLevel(216_000, undefined, t, step)).toBe('none')
+  expect(nudgeLevel(217_000, undefined, t, step)).toBe('soft')
+  expect(nudgeLevel(240_000, 217_000, t, step)).toBe('none')
+  expect(nudgeLevel(270_000, 217_000, t, step)).toBe('soft')
+  expect(nudgeLevel(350_000, undefined, t, step)).toBe('urgent')
+  // Crossing into urgent escalates at once.
+  expect(nudgeLevel(350_000, 340_000, t, step)).toBe('urgent')
 })
 
 test('nudgeLevel: start raised to floor', () => {
-  expect(nudgeLevel(29, undefined, 30, DEFAULTS)).toBe('none')
-  expect(nudgeLevel(30, undefined, 30, DEFAULTS)).toBe('soft')
+  const t = TH(65_000, 1_000_000, { ...DEFAULTS, floorPct: 30 })
+  expect(nudgeLevel(299_000, undefined, t, 50_000)).toBe('none')
+  expect(nudgeLevel(300_000, undefined, t, 50_000)).toBe('soft')
+})
+
+test('callsToTokens: P=87k matches the spec table', () => {
+  expect(Math.round(callsToTokens(20, 87_000, 105_000) / 1000)).toBe(147)
+  expect(Math.round(callsToTokens(10, 87_000, 105_000) / 1000)).toBe(213)
+  expect(Math.round(callsToTokens(8, 87_000, 105_000) / 1000)).toBe(249)
+})
+
+test('thresholds: 1M window, P=87k', () => {
+  const t = thresholds(87_000, 1_000_000, DEFAULTS)
+  expect(t.urgent).toBe(350_000)
+  expect(t.heavy).toBe(false)
+  expect(t.floor < t.node && t.node < t.work && t.work < t.urgent).toBe(true)
+})
+
+test('thresholds: 200k window clamps', () => {
+  const t = thresholds(87_000, 200_000, DEFAULTS)
+  expect(t.urgent).toBe(160_000)
+  expect(Math.max(t.floor, t.node, t.work)).toBeLessThanOrEqual(t.urgent)
+  expect(t.heavy).toBe(false) // small window is not a heavy harness
+})
+
+test('thresholds: P=200k is heavy', () => {
+  expect(thresholds(200_000, 1_000_000, DEFAULTS).heavy).toBe(true) // C(8)=379k >= 350k
+})
+
+test('thresholds: floorPct is an extra lower bound', () => {
+  expect(thresholds(40_000, 1_000_000, { ...DEFAULTS, floorPct: 20 }).floor).toBe(200_000)
+})
+
+test('thresholds: every tier is at least P + 25k, even above urgentK', () => {
+  const t = thresholds(63_000, 1_000_000, { ...DEFAULTS, urgentK: 50 })
+  expect(t.urgent).toBe(88_000)
+  expect(Math.min(t.floor, t.node, t.work)).toBeGreaterThanOrEqual(88_000)
+})
+
+test('thresholds: the minimum gain leaves default tiers unchanged', () => {
+  const t = thresholds(87_000, 1_000_000, DEFAULTS)
+  expect([t.floor, t.node, t.work, t.urgent].map(v => Math.round(v / 1000))).toEqual([147, 213, 249, 350])
+})
+
+test('configFrom: calls clamp to >= 2', () => {
+  expect(configFrom({ nodeCalls: 1 }).nodeCalls).toBe(2)
+  expect(configFrom({ workCalls: 'x' }).workCalls).toBe(DEFAULTS.workCalls)
+})
+
+test('deprecatedKeys: lists the old keys that were set', () => {
+  expect(deprecatedKeys({ minSavingK: 40, floorPct: 15 })).toEqual(['minSavingK'])
 })
 
 const HANDOFF: Handoff = {
@@ -246,11 +301,28 @@ function engine(
   const messages = [{ role: 'user', text: '请继续做 Task 3', toolUses: [] }]
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('session.id', () => ({ value: 'sess1' }))
-  on('session.usage', () => ({ value: { startedAt: 0, context: usage, rateLimits: [] } }))
+  const fail = { usage: false, invalidate: false }
+  const usageCalls: unknown[] = []
+  on('session.usage', async (_, e) => {
+    usageCalls.push(e)
+    if (fail.usage) throw new Error('usage unsupported')
+    return { value: { startedAt: 0, context: usage, rateLimits: [] } }
+  })
   on('session.messages', () => ({ value: messages }))
   on('tool.register', (_, e) => {
     registered.push(e as never)
     return { value: { tool: TOOL_FULL } }
+  })
+  const describeHook: { run?: () => Promise<unknown> } = {}
+  on('tool.describe', async (_, e) => {
+    await describeHook.run?.()
+    return { description: e.description }
+  })
+  const invalidated: string[] = []
+  on('ui.invalidate', (_, e) => {
+    if (fail.invalidate) throw new Error("invalidate unsupported")
+    invalidated.push(e.event)
+    return { value: undefined }
   })
   on('fs.write', (_, e) => {
     files.set(key(e.path), e.text)
@@ -315,7 +387,7 @@ function engine(
       .split('\n')
       .filter(Boolean)
       .map(l => JSON.parse(l) as { result: string; session: string; node?: string; pct?: number; reason?: string; beforePct?: number; afterPct?: number; durationMs?: number })
-  return { clock, files, registered, statuses, handoffs, log, usage, compactPlan, compactCalls, toasts, submits, wait, step, stopAnswer, fsFlags, messages }
+  return { describeHook, usageCalls, clock, files, registered, invalidated, statuses, handoffs, log, usage, compactPlan, compactCalls, toasts, submits, wait, step, stopAnswer, fsFlags, messages, fail }
 }
 
 const start = ($: Dollar, isInteractive = true) =>
@@ -359,7 +431,7 @@ testZh('tool: below floor denied with pct', async ($, on) => {
   await start($)
   const r = await call($, HANDOFF)
   expect(r.deny).toContain('12%')
-  expect(r.deny).toContain('12.5')
+  expect(r.deny).toContain('15%')
   expect(w.handoffs()).toEqual([])
   expect(w.statuses).toEqual([])
   expect(w.log().at(-1)?.result).toBe('denied:gate')
@@ -527,6 +599,22 @@ testZh('stale after 4 tool calls drops request', async ($, on) => {
 // ---- executor and continuation ----
 
 const turnStart = ($: Dollar, turnId: string) => $.turn.start({ text: 'x', turnId } as never)
+const expectEnCriteria = (t: string) => {
+  expect(t).toContain('break-even line')
+  expect(t).toContain('necessary, not sufficient')
+  expect(t).toContain('(1)')
+  expect(t).toContain('(2)')
+  expect(t).toContain('(3)')
+  expect(t).not.toMatch(/do not judge|already checked/)
+}
+const expectZhCriteria = (t: string) => {
+  expect(t).toContain('回本线')
+  expect(t).toContain('必要条件')
+  expect(t).toContain('（1）')
+  expect(t).toContain('（2）')
+  expect(t).toContain('（3）')
+  expect(t).not.toMatch(/不用再判断|已确认现在压缩划算/)
+}
 const turnComplete = ($: Dollar, turnId: string, isAborted = false, answer = '') =>
   $.turn.complete({
     answer: answer,
@@ -820,17 +908,19 @@ testZh('nudge: counts afresh after a compaction', async ($, on) => {
   await turnComplete($, 't1')
   await w.clock.advance(1_500)
   expect(w.compactCalls.length).toBe(1)
+  // The first step after a compaction is the post-compact size, not a nudge candidate.
+  await modelStep($, w, 80_000)
   await modelStep($, w, 300_000)
   expect(await ctxOf($)).toContain('30%')
 })
 
-testZh('baseline: first main step sets the floor', async ($, on) => {
-  // A 120k baseline needs 120k + 20k + 40k = 180k before compact_now is accepted.
-  const w = engine(on, { tokens: 170_000, window: 1_000_000 })
+testZh('baseline: seeds P (baseline + 25k) while nothing is learned', async ($, on) => {
+  // First step 120k: P = 145k, floor C(20) = 208k.
+  const w = engine(on, { tokens: 200_000, window: 1_000_000 })
   await start($)
   await modelStep($, w, 120_000)
-  expect((await call($, HANDOFF)).deny).toContain('17%')
-  w.usage.tokens = 190_000
+  expect((await call($, HANDOFF)).deny).toContain('208k')
+  w.usage.tokens = 210_000
   expect((await call($, HANDOFF)).deny).toBeUndefined()
 })
 
@@ -897,10 +987,10 @@ testZh('session.end (/clear): nudge counters, notes and baseline start afresh', 
   await modelStep($, w, 300_000)
   expect(await ctxOf($)).toContain('30%')
   await sessionEnd($)
-  // Same 30% again in the new session nudges again, and a 120k first step is the new baseline.
+  // Same 30% again in the new session nudges again, and a 120k first step is the new baseline (floor 208k).
   await modelStep($, w, 120_000)
-  w.usage.tokens = 170_000
-  expect((await call($, HANDOFF)).deny).toContain('17%')
+  w.usage.tokens = 140_000
+  expect((await call($, HANDOFF)).deny).toContain('208k')
   await modelStep($, w, 300_000)
   expect(await ctxOf($)).toContain('30%')
 })
@@ -948,7 +1038,7 @@ testZh('log: concurrent writers keep every line', async ($, on) => {
   const w = engine(on)
   await start($)
   await Promise.all([call($, HANDOFF, { agentId: 'a' }), call($, HANDOFF, { agentId: 'b' }), call($, HANDOFF, { agentId: 'c' })])
-  expect(w.log().length).toBe(3)
+  expect(w.log().filter(l => l.result.startsWith('denied')).length).toBe(3)
 })
 
 testZh('log: an unreadable existing log is never overwritten', async ($, on) => {
@@ -1015,16 +1105,16 @@ testZh('tool description (zh): short, with tiers, nodes, anti-nodes and the end-
   const w = engine(on)
   await start($)
   const d = w.registered[0].description
-  expect(d.length <= 640).toBe(true)
-  for (const s of ['10%', '15%', '20%', '35%', '好节点', '反节点', '标出节点', '不要再调用']) expect(d).toContain(s)
+  expect(d.length).toBeLessThanOrEqual(680)
+  for (const s of ['150k（15%）', '217k（22%）', '350k（35%）', '好节点', '反节点', '标出节点', '不要再调用']) expect(d).toContain(s)
 })
 
 test('configFrom: defaults, strings and booleans', () => {
   expect(configFrom(undefined)).toEqual(DEFAULTS)
-  const c = configFrom({ floorPct: '20', minSavingK: 25, nudgeStartPct: '', enabled: 'false' })
+  const c = configFrom({ floorPct: '20', urgentK: 300, nodeCalls: '', enabled: 'false' })
   expect(c.floorPct).toBe(20)
-  expect(c.minSavingK).toBe(25)
-  expect(c.nudgeStartPct).toBe(20)
+  expect(c.urgentK).toBe(300)
+  expect(c.nodeCalls).toBe(DEFAULTS.nodeCalls)
   expect(c.enabled).toBe(false)
   expect(configFrom({ enabled: false }).enabled).toBe(false)
   expect(configFrom({ enabled: true }).enabled).toBe(true)
@@ -1091,11 +1181,34 @@ test('tool description (en): short with tiers, nodes, anti-nodes and end-the-tur
   const w = engine(on)
   await start($)
   const d = w.registered[0].description
-  expect(d.length <= 700).toBe(true)
-  for (const s of ['10%', '15%', '20%', '35%', 'Good nodes', 'Anti-nodes', 'flags nodes', 'end the turn now', 'call no more tools']) {
+  expect(d.length).toBeLessThanOrEqual(800)
+  for (const s of ['150k (15%)', '217k (22%)', '350k (35%)', 'Good nodes', 'Anti-nodes', 'flags nodes', 'end the turn now', 'call no more tools']) {
     expect(d).toContain(s)
   }
   expect(d.replace(/[→·]/g, '')).not.toMatch(NON_ASCII)
+})
+test('prompts (en): thresholds are necessary, the three criteria decide', async ($, on) => {
+  const w = engine(on)
+  await start($)
+  await modelStep($, w, 65_000)
+  await modelStep($, w, 300_000)
+  expectEnCriteria(await ctxOf($))
+  await modelStep($, w, 410_000)
+  const urgent = await ctxOf($)
+  expect(urgent).toContain('(1)')
+  expect(urgent).not.toMatch(/do not judge|already checked/)
+  for (const [k, f] of [
+    ['selfCheck', STRINGS.en.selfCheck('push', 20)],
+    ['selfCheckWork', STRINGS.en.selfCheckWork(20)],
+    ['selfCheckLong', STRINGS.en.selfCheckLong(20)],
+    ['topicSwitch', STRINGS.en.topicSwitch(20)],
+    ['nodeNudge', STRINGS.en.nodeNudge('push', 20)],
+  ] as const) {
+    expectEnCriteria(f)
+    if (k.startsWith('selfCheck')) expect(f).toContain('skip: <one-line reason>')
+  }
+  expect(STRINGS.zh.nudgeUrgent(40)).toContain('（1）')
+  for (const f of [STRINGS.zh.nudgeSoft(30), STRINGS.zh.selfCheckWork(20), STRINGS.zh.selfCheckLong(20), STRINGS.zh.topicSwitch(20)]) expectZhCriteria(f)
 })
 test('i18n: en nudges and stale note are English', async ($, on) => {
   const w = engine(on)
@@ -1207,10 +1320,9 @@ testZh('node nudge: rides the tool result after git push', async ($, on) => {
   await start($)
   await turnStart($, 't1')
   const r = await gitPush($)
-  expect(r.context?.join('\n')).toBe(
-    '[self-compact] 刚才的 git push 像是一个节点（上下文 20%，插件已确认现在压缩划算，不用再判断大小）。' +
-      '压缩不会打断任务，压完会自动接着做；只要这一步已收尾、没有开着的提问（成果已落盘、交给用户审阅也算收尾，写进 pending），就在本轮结束前调用 compact_now。',
-  )
+  const t = r.context?.join('\n') ?? ''
+  expect(t).toContain('[self-compact] 刚才的 git push 像是一个节点（上下文 20%')
+  expectZhCriteria(t)
   const row = w.log().find(l => l.result === 'node-nudge')
   expect(row?.kind).toBe('push')
   expect(row?.pct).toBe(20)
@@ -1249,7 +1361,7 @@ testZh('node nudge: silent below the gate', async ($, on) => {
   await start($)
   await turnStart($, 't1')
   expect((await gitPush($)).context).toBeUndefined()
-  // Gate open but a weak signal needs floor + 5 = 17.5%.
+  // Gate open (floor 150k) but a weak signal needs the node tier, 217k.
   w.usage.tokens = 170_000
   expect((await gitCommit($)).context).toBeUndefined()
   // A strong one does not.
@@ -1258,7 +1370,7 @@ testZh('node nudge: silent below the gate', async ($, on) => {
   expect((await gitPush($)).context?.join(' ')).toContain('17%')
   await turnComplete($, 't2')
   await turnStart($, 't3')
-  w.usage.tokens = 200_000
+  w.usage.tokens = 220_000
   expect((await gitCommit($)).context?.join(' ')).toContain('git commit')
   expect(w.log().filter(l => l.result === 'node-nudge').length).toBe(2)
 })
@@ -1283,11 +1395,9 @@ testZh('self-check: submitted after a node turn without compact_now', async ($, 
   expect(w.submits).toEqual([])
   await w.clock.advance(1)
   expect(w.submits.length).toBe(1)
-  expect(w.submits[0].text).toBe(
-    '[self-compact 自检] 上一轮出现了节点信号（push），上下文 20%，插件已确认现在压缩划算。' +
-      '压缩不会打断任务，压完会自动接着做。' +
-      '只要当前步骤已收尾、没有开着的提问（成果已落盘、交给用户审阅也算收尾，写进 pending），现在就调用 compact_now（next 写接下来要做的事；没有就写怎么回应用户最新的消息）；否则只回复「不压」并结束。',
-  )
+  expect(w.submits[0].text).toContain('[self-compact 自检] 上一轮出现了节点信号（push），上下文 20%')
+  expectZhCriteria(w.submits[0].text)
+  expect(w.submits[0].text).toContain('skip: <一句理由>')
   expect(w.log().some(l => l.result === 'self-check' && l.kind === 'push')).toBe(true)
 })
 
@@ -1304,6 +1414,29 @@ testZh('self-check: not after a turn that already called compact_now', async ($,
   expect(w.log().some(l => l.result === 'self-check')).toBe(false)
 })
 
+const SKIP_CASES: [string, string, string | undefined][] = [
+  ['skip: still comparing the diff line by line', 'reason', 'still comparing the diff line by line'],
+  ['skip', 'bare', undefined],
+  ['Skip：长文件刚读完', 'fullwidth colon', '长文件刚读完'],
+  ['skip: ' + 'x'.repeat(300), 'capped', 'x'.repeat(200)],
+  ['', 'empty answer', undefined],
+]
+for (const [answer, name, reason] of SKIP_CASES) {
+  testZh(`self-check: declined log reason (${name})`, async ($, on) => {
+    const w = engine(on)
+    await start($)
+    await turnStart($, 't1')
+    await gitPush($)
+    await turnComplete($, 't1')
+    await w.clock.advance(1_500)
+    await turnStart($, 't2')
+    await turnComplete($, 't2', false, answer)
+    const row = w.log().at(-1)
+    expect(row?.result).toBe('self-check:declined')
+    expect(row?.reason).toBe(reason)
+  })
+}
+
 testZh('self-check: logs compacted and declined on the following turn', async ($, on) => {
   const w = engine(on)
   await start($)
@@ -1312,8 +1445,9 @@ testZh('self-check: logs compacted and declined on the following turn', async ($
   await turnComplete($, 't1')
   await w.clock.advance(1_500)
   await turnStart($, 't2')
-  await turnComplete($, 't2', false, '不压')
+  await turnComplete($, 't2', false, 'skip: just pushed a small fix, no phase boundary')
   expect(w.log().at(-1)?.result).toBe('self-check:declined')
+  expect(w.log().at(-1)?.reason).toBe('just pushed a small fix, no phase boundary')
   w.usage.tokens = 260_000
   await turnStart($, 't3')
   await gitPush($)
@@ -1357,7 +1491,8 @@ testZh('self-check: a turn ending with a question still asks (completion summari
 })
 
 testZh('self-check: a work turn without a node signal asks', async ($, on) => {
-  const w = engine(on)
+  // Work-block tier C(8) = 253k at P = 90k.
+  const w = engine(on, { tokens: 260_000, window: 1_000_000 })
   await start($)
   await turnStart($, 't1')
   await bash($)
@@ -1366,7 +1501,7 @@ testZh('self-check: a work turn without a node signal asks', async ($, on) => {
   await w.clock.advance(1_500)
   expect(w.submits.length).toBe(1)
   expect(w.submits[0].text).toContain('上一轮做完了一整块工作')
-  expect(w.submits[0].text).toContain('20%')
+  expect(w.submits[0].text).toContain('26%')
   // A single tool call is not a block of work.
   const before = w.submits.length
   w.usage.tokens = 190_000
@@ -1419,7 +1554,7 @@ testZh('self-check: rate-limited per kind and growth', async ($, on) => {
   expect(w.submits.length).toBe(1)
   // The check turn itself: Claude declines without tools; no second check follows.
   await turnStart($, 't2')
-  await turnComplete($, 't2', false, '不压')
+  await turnComplete($, 't2', false, 'skip: rate-limit case')
   await w.clock.advance(5_000)
   expect(w.submits.length).toBe(1)
   // Same kind, same size: rate-limited.
@@ -1454,15 +1589,16 @@ test('self-check: disabled by turnEndCheck=false', { options: { language: 'zh', 
 })
 
 testZh('topic switch: hint added as soon as the gate opens', async ($, on) => {
-  const w = engine(on, { tokens: 120_000, window: 1_000_000 })
+  const w = engine(on, { tokens: 140_000, window: 1_000_000 })
   await start($)
   await userPrompt($, '换个需求')
   expect(w.submits.at(-1)?.context).toBeUndefined()
-  w.usage.tokens = 130_000
+  w.usage.tokens = 150_000
   await userPrompt($, '换个需求')
-  expect(w.submits.at(-1)?.context?.join('\n')).toBe(
-    '[self-compact] 上下文 13%，插件已确认现在压缩划算。如果这条消息开启一个新工作块（换了话题，或隔了一阵重新接着做）而上一块已经收尾，先调用 compact_now（next 写这条需求的原文要点）再结束本轮；压缩不会打断任务，压完会自动接着做。',
-  )
+  const tsw = w.submits.at(-1)?.context?.join('\n') ?? ''
+  expect(tsw).toContain('[self-compact] 上下文 15%')
+  expectZhCriteria(tsw)
+  expect(tsw).toContain('新工作块')
   // Slash commands and non-human prompts get none.
   await $.prompt.submit({ text: '/help', command: { name: 'help' }, origin: { kind: 'composer' }, wait: false } as never)
   expect(w.submits.at(-1)?.context).toBeUndefined()
@@ -1516,26 +1652,24 @@ test('configFrom: autoNodes and turnEndCheck default on, accept booleans and str
   expect(configFrom({ autoNodes: 'true' }).autoNodes).toBe(true)
 })
 
-test('tool description: tiers come from config', { options: { floorPct: 1 } }, async ($, on) => {
+test('tool description: tiers come from config', { options: { floorPct: 20 } }, async ($, on) => {
   const w = engine(on)
   await start($)
   const d = w.registered[0].description
-  expect(d).toContain('<1% denied')
-  expect(d).toContain('1-6%')
-  expect(d).toContain('>=6%')
+  expect(d).toContain('<200k (20%) denied')
+  expect(d).toContain('200k (20%)-217k (22%)')
   expect(d).not.toContain('15%')
-  expect(d.length <= 700).toBe(true)
+  expect(d.length).toBeLessThanOrEqual(800)
 })
 
-test('tool description (zh): tiers come from config', { options: { language: 'zh', floorPct: 1, urgentPct: 50 } }, async ($, on) => {
+test('tool description (zh): tiers come from config', { options: { language: 'zh', floorPct: 20, urgentK: 300 } }, async ($, on) => {
   const w = engine(on)
   await start($)
   const d = w.registered[0].description
-  expect(d).toContain('<1% 拒绝')
-  expect(d).toContain('1-6%')
-  expect(d).toContain('>=50%')
+  expect(d).toContain('<200k（20%） 拒绝')
+  expect(d).toContain('>=300k（30%）')
   expect(d).not.toContain('15%')
-  expect(d.length <= 640).toBe(true)
+  expect(d.length).toBeLessThanOrEqual(800)
 })
 
 test('nudge text: says the gate passed and compaction does not stop the task', async ($, on) => {
@@ -1544,8 +1678,7 @@ test('nudge text: says the gate passed and compaction does not stop the task', a
   await turnStart($, 't1')
   const r = await gitPush($)
   const t = r.context?.join('\n') ?? ''
-  expect(t).toContain('already checked')
-  expect(t).toContain('do not judge the size again')
+  expectEnCriteria(t)
   expect(t).toContain('does not stop or interrupt the task')
 })
 
@@ -1555,7 +1688,335 @@ testZh('nudge text (zh): says the gate passed and compaction does not stop the t
   await turnStart($, 't1')
   const r = await gitPush($)
   const t = r.context?.join('\n') ?? ''
-  expect(t).toContain('插件已确认现在压缩划算')
-  expect(t).toContain('不用再判断大小')
+  expectZhCriteria(t)
   expect(t).toContain('压缩不会打断任务')
+})
+
+test('learnP: first sample seeds, then EWMA 0.3', () => {
+  const a = learnP(undefined, 80_000)
+  expect(a).toEqual({ p: 80_000, n: 1 })
+  expect(learnP(a, 90_000).p).toBe(83_000)
+})
+
+test('learnP: an outlier moves the estimate at 0.1', () => {
+  expect(learnP({ p: 80_000, n: 5 }, 200_000).p).toBe(92_000)
+})
+
+test('learnP: three same-direction outliers reset', () => {
+  let e: PEst = { p: 80_000, n: 9 }
+  for (const s of [150_000, 160_000, 170_000]) e = learnP(e, s)
+  expect(e.p).toBe(160_000)
+  expect(e.n).toBe(3)
+  expect(e.out).toBeUndefined()
+})
+
+test('learnP: a normal sample or a direction change clears the outlier run', () => {
+  let e: PEst = learnP({ p: 80_000, n: 9 }, 150_000)
+  e = learnP(e, 160_000)
+  expect(e.out?.samples.length).toBe(2)
+  expect(learnP(e, e.p).out).toBeUndefined()
+  expect(learnP(e, 10_000).out).toEqual({ dir: -1, samples: [10_000] })
+})
+
+test('pickP: session sample > project n>=3 > global n>=3 > baseline+25k', () => {
+  const prof = { global: { p: 70_000, n: 3 }, byProject: { '/a': { p: 90_000, n: 3 }, '/b': { p: 50_000, n: 2 } } }
+  expect(pickP(prof, '/a', 99_000, 60_000)).toBe(99_000)
+  expect(pickP(prof, '/a', undefined, 60_000)).toBe(90_000)
+  expect(pickP(prof, '/b', undefined, 60_000)).toBe(70_000)
+  expect(pickP({ byProject: {} }, '/b', undefined, undefined)).toBe(90_000)
+  expect(pickP({ byProject: {} }, '/b', undefined, 60_000)).toBe(85_000)
+})
+
+test('profile: corrupt json reads as empty', () => {
+  expect(parseProfile('{oops')).toEqual({ byProject: {} })
+  expect(parseProfile('[1]')).toEqual({ byProject: {} })
+  expect(parseProfile(undefined)).toEqual({ byProject: {} })
+})
+
+// saveProfile only touches env and fs; shim them over the engine fixture.
+const mod = (w: ReturnType<typeof engine>) =>
+  ({
+    env: { get: async (k: string) => (k === 'HOME' ? '/home/u' : undefined) },
+    fs: {
+      exists: async (p: string) => w.files.has(p),
+      read: async (p: string) => { if (w.fsFlags.failRead) throw new Error('EIO'); return w.files.get(p) as string },
+      write: async (p: string, t: string) => void w.files.set(p, t),
+    },
+  }) as never
+
+testZh('profile: merge keeps other project', async ($, on) => {
+  const w = engine(on)
+  w.files.set(`${ROOT}/profile.json`, JSON.stringify({ byProject: { '/other': { p: 70_000, n: 4 } } }))
+  await saveProfile(mod(w), (p) => {
+    p.byProject['/proj'] = learnP(p.byProject['/proj'], 80_000)
+  })
+  const saved = JSON.parse(w.files.get(`${ROOT}/profile.json`) as string)
+  expect(saved.byProject['/other']).toEqual({ p: 70_000, n: 4 })
+  expect(saved.byProject['/proj']).toEqual({ p: 80_000, n: 1 })
+})
+
+testZh('profile: unreadable file is left alone and never throws', async ($, on) => {
+  const w = engine(on)
+  w.files.set(`${ROOT}/profile.json`, '{keep')
+  w.fsFlags.failRead = true
+  await saveProfile(mod(w), (p) => {
+    p.global = { p: 1, n: 1 }
+  })
+  w.fsFlags.failRead = false
+  expect(w.files.get(`${ROOT}/profile.json`)).toBe('{keep')
+})
+
+// ---- adaptive thresholds wired in ----
+
+const withProject = (w: W, p: number, n = 3) =>
+  w.files.set(`${ROOT}/profile.json`, JSON.stringify({ byProject: { '/': { p, n } } }))
+
+testZh('gate: P=87k denies 140k, accepts 150k', async ($, on) => {
+  const w = engine(on, { tokens: 140_000, window: 1_000_000 })
+  withProject(w, 87_000)
+  await start($)
+  const denied = await call($, HANDOFF)
+  expect(denied.deny).toContain('147k')
+  w.usage.tokens = 150_000
+  expect(String((await call($, HANDOFF)).result)).toContain('已排队')
+})
+
+testZh('self-check: work turn below C(8) is quiet, above fires', async ($, on) => {
+  const w = engine(on, { tokens: 200_000, window: 1_000_000 })
+  withProject(w, 87_000)
+  await start($)
+  await turnStart($, 't1')
+  await bash($)
+  await bash($)
+  await turnComplete($, 't1')
+  await w.clock.advance(5_000)
+  expect(w.submits.length).toBe(0)
+  w.usage.tokens = 255_000
+  await turnStart($, 't2')
+  await bash($)
+  await bash($)
+  await turnComplete($, 't2')
+  await w.clock.advance(1_500)
+  expect(w.submits.length).toBe(1)
+  expect(w.submits[0].text).toContain('上一轮做完了一整块工作')
+})
+
+testZh('self-check: weak node needs C(10), strong needs floor', async ($, on) => {
+  const w = engine(on, { tokens: 200_000, window: 1_000_000 })
+  withProject(w, 87_000)
+  await start($)
+  const turn = async (id: string, f: ($: Dollar) => Promise<Out>) => {
+    await turnStart($, id)
+    await f($)
+    await turnComplete($, id)
+    await w.clock.advance(1_500)
+  }
+  await turn('t1', gitCommit)
+  expect(w.submits.length).toBe(0)
+  await turn('t2', gitPush)
+  expect(w.submits.length).toBe(1)
+  await turnStart($, 't3')
+  await turnComplete($, 't3', false, '不压')
+  w.usage.tokens = 215_000
+  await turn('t4', gitCommit)
+  expect(w.submits.length).toBe(2)
+})
+
+testZh('nudge: starts at C(10), urgent at 350k', async ($, on) => {
+  const w = engine(on)
+  withProject(w, 87_000)
+  await start($)
+  await modelStep($, w, 65_000)
+  await modelStep($, w, 212_000)
+  expect(await ctxOf($)).toBe('')
+  await modelStep($, w, 214_000)
+  expect(await ctxOf($)).toContain('compact_now')
+  await modelStep($, w, 350_000)
+  expect(await ctxOf($)).toContain('下一个安全步骤')
+})
+
+test('nudgeLevel: absolute tiers and step', () => {
+  const t = thresholds(87_000, 1_000_000, DEFAULTS)
+  expect(nudgeLevel(212_000, undefined, t, 50_000)).toBe('none')
+  expect(nudgeLevel(214_000, undefined, t, 50_000)).toBe('soft')
+  expect(nudgeLevel(250_000, 214_000, t, 50_000)).toBe('none')
+  expect(nudgeLevel(350_000, 214_000, t, 50_000)).toBe('urgent')
+})
+
+testZh('pSample: first main step after compaction is logged and learned', async ($, on) => {
+  const w = engine(on)
+  await start($)
+  await modelStep($, w, 65_000)
+  expect(w.log().some(l => l.result === 'p-sample')).toBe(false)
+  await $.session.compact({ instructions: "x", messages: [{ role: 'user', text: 's', toolUses: [] }] } as never)
+  await modelStep($, w, 80_000)
+  const row = w.log().find(l => l.result === 'p-sample') as { pSample?: number; p?: number } | undefined
+  expect(row?.pSample).toBe(80_000)
+  expect(row?.p).toBe(80_000)
+  const saved = JSON.parse(w.files.get(`${ROOT}/profile.json`) as string)
+  expect(saved.global).toEqual({ p: 80_000, n: 1 })
+  expect(saved.byProject['/']).toEqual({ p: 80_000, n: 1 })
+  // Learned once: later steps add nothing, and the tool description is invalidated once.
+  await modelStep($, w, 90_000)
+  expect(w.log().filter(l => l.result === 'p-sample').length).toBe(1)
+  expect(w.invalidated).toEqual(['tool.describe'])
+})
+
+testZh('pSample: zero-usage and subagent steps ignored', async ($, on) => {
+  const w = engine(on)
+  await start($)
+  await modelStep($, w, 65_000)
+  await $.session.compact({ instructions: "x", messages: [{ role: 'user', text: 's', toolUses: [] }] } as never)
+  await modelStep($, w, 70_000, 'sub1')
+  await modelStep($, w, 0)
+  expect(w.log().some(l => l.result === 'p-sample')).toBe(false)
+  await modelStep($, w, 82_000)
+  expect(w.log().filter(l => l.result === 'p-sample').length).toBe(1)
+})
+
+testZh('heavy harness note fires once', async ($, on) => {
+  const w = engine(on)
+  withProject(w, 200_000)
+  await start($)
+  await modelStep($, w, 65_000)
+  await modelStep($, w, 100_000)
+  const first = await ctxOf($)
+  expect(first).toContain('压缩后上下文仍有 200k')
+  await modelStep($, w, 110_000)
+  expect(await ctxOf($)).toBe('')
+})
+
+test('tool description: shows absolute tiers for the current P', async ($, on) => {
+  const w = engine(on)
+  withProject(w, 87_000)
+  await start($)
+  const d = w.registered[0].description
+  expect(d).toContain('147k (15%)')
+  expect(d).toContain('213k (21%)')
+  expect(d).toContain('350k (35%)')
+})
+
+test('tool description: tiers use the real compaction window', async ($, on) => {
+  const w = engine(on, { window: 1_000_000, breakdown: { maxTokens: 200_000 } } as never)
+  withProject(w, 87_000)
+  await start($)
+  await modelStep($, w, 65_000)
+  expect((await describeTool($)).description).toContain('160k (80%)')
+})
+
+test('configFrom: deprecated keys logged once at start', { options: { minSavingK: 40, urgentPct: 30 } }, async ($, on) => {
+  const w = engine(on)
+  await start($)
+  const rows = w.log().filter(l => l.result === 'deprecated')
+  expect(rows.length).toBe(1)
+  expect(rows[0].reason).toContain("minSavingK")
+})
+
+test('configFrom: urgentK and compactCostK are clamped positive', () => {
+  expect(configFrom({ urgentK: -5, compactCostK: 0 }).urgentK).toBe(50)
+  expect(configFrom({ urgentK: -5, compactCostK: 0 }).compactCostK).toBe(1)
+  expect(configFrom({ urgentK: 300 }).urgentK).toBe(300)
+})
+
+test('parseProfile: entries with non-finite p or n read as absent', () => {
+  const text = '{"global":{"p":null,"n":3},"byProject":{"/a":{"p":"x","n":1},"/b":{"p":90000,"n":3},"/c":{"p":8e4}}}'
+  expect(parseProfile(text)).toEqual({ byProject: { '/b': { p: 90_000, n: 3 } } })
+})
+
+test('parseProfile: a __proto__ project key does not touch the prototype', () => {
+  const p = parseProfile('{"byProject":{"__proto__":{"p":90000,"n":3},"/b":{"p":80000,"n":3}}}')
+  expect(Object.getPrototypeOf(p.byProject)).toBe(Object.prototype)
+  expect((p.byProject as { p?: number }).p).toBeUndefined()
+  expect(p.byProject['/b']).toEqual({ p: 80_000, n: 3 })
+})
+
+test('session.start: a throwing usage read still registers compact_now and calls next', async ($, on) => {
+  const w = engine(on)
+  w.fail.usage = true
+  const r = (await start($)) as { cwd?: string }
+  expect(w.registered.length).toBe(1)
+  expect(r.cwd).toBe('/')
+})
+
+
+const describeTool = ($: Dollar) =>
+  $.tool.describe({ tool: TOOL_FULL, description: 'engine text', provider: { plugin: 'self-compact', tier: 'user' } } as never) as Promise<{ description: string; breakPromptCache?: boolean }>
+
+test('tool.describe: answers with tiers for the current P and does not break the prompt cache', async ($, on) => {
+  const w = engine(on)
+  withProject(w, 87_000)
+  await start($)
+  expect((await describeTool($)).description).toContain('147k (15%)')
+  await modelStep($, w, 65_000)
+  await $.session.compact({ instructions: 'x', messages: [{ role: 'user', text: 's', toolUses: [] }] } as never)
+  await modelStep($, w, 60_000)
+  const r = await describeTool($)
+  expect(r.description).toContain('leaves ~60k')
+  expect(r.description).not.toContain('147k (15%)')
+  expect(r.breakPromptCache).toBeUndefined()
+  expect(w.log().filter(l => l.result === 'tool-describe').map(l => (l as { p?: number }).p)).toEqual([87_000, 60_000])
+  expect(w.registered.length).toBe(1)
+})
+
+test('tool.describe: other tools pass through untouched', async ($, on) => {
+  const w = engine(on)
+  await start($)
+  const r = (await $.tool.describe({ tool: 'Bash', description: 'engine text', provider: { plugin: 'engine', tier: 'core' } } as never)) as { description: string }
+  expect(r.description).toBe('engine text')
+})
+
+test('learnSample: invalidates the cached tool description', async ($, on) => {
+  const w = engine(on)
+  const { invalidated } = w
+  await start($)
+  await modelStep($, w, 65_000)
+  expect(invalidated).toEqual([])
+  await $.session.compact({ instructions: 'x', messages: [{ role: 'user', text: 's', toolUses: [] }] } as never)
+  await modelStep($, w, 80_000)
+  expect(invalidated).toEqual(['tool.describe'])
+})
+
+// Sample 80k with urgentK 50: every tier is raised to P + 25k = 105k, and c(8) = (10*cost + 8*80k)/7 >= 50k, so the harness note is due.
+// A nudge cannot fire on the sample step itself (tiers >= P + 25k > sample), so the note is the same-step output observed.
+test('learnSample: a throwing ui.invalidate does not stop the rest of the step', { options: { urgentK: 50 } }, async ($, on) => {
+  const w = engine(on)
+  w.fail.invalidate = true
+  await start($)
+  await modelStep($, w, 65_000)
+  await $.session.compact({ instructions: 'x', messages: [{ role: 'user', text: 's', toolUses: [] }] } as never)
+  await modelStep($, w, 80_000)
+  expect(w.log().some(l => l.result === 'p-sample')).toBe(true)
+  expect(w.invalidated).toEqual([])
+  expect(await ctxOf($)).toMatch(/is still \d+k/)
+})
+
+test('tool.describe: never reads usage, so a breakdown cannot re-enter it', async ($, on) => {
+  const w = engine(on)
+  await start($)
+  const before = w.usageCalls.length
+  await describeTool($)
+  expect(w.usageCalls.length).toBe(before)
+})
+
+test('tool.describe: re-entrant describe passes through unchanged', async ($, on) => {
+  const w = engine(on)
+  await start($)
+  // Rendering schemas inside describe fires describe again; stop after one nested call.
+  let depth = 0
+  w.describeHook.run = async () => {
+    if (depth++ < 3) await describeTool($)
+  }
+  const r = await describeTool($)
+  expect(r.description).toContain('compact')
+  expect(w.log().filter(l => l.result === 'tool-describe').length).toBe(1)
+})
+
+test('tool.describe: uses the window the last step read', async ($, on) => {
+  const w = engine(on, { tokens: 20_000, window: 100_000 })
+  await start($)
+  const ref = (await describeTool($)).description
+  await modelStep($, w, 20_000)
+  const small = (await describeTool($)).description
+  expect(small).not.toBe(ref)
+  expect(small).toContain('%')
 })

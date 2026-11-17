@@ -1,6 +1,6 @@
 {
   "name": "self-compact",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Claude Code plugin that lets Claude compact its own context at task milestones: agent-initiated /compact with self-written handoff instructions, gated by context size, then auto-continue. Smarter auto-compact for long sessions. English and Chinese UI.",
   "author": { "name": "w21180239" },
   "license": "MIT",
@@ -16,33 +16,45 @@
     },
     "floorPct": {
       "type": "number",
-      "title": "Compaction floor (%)",
-      "description": "compact_now is denied while the context is below this percentage of the window",
+      "title": "Extra floor (%)",
+      "description": "Optional extra floor as a percentage of the window; the floor is the larger of this and the floorCalls size. 0 disables it",
+      "default": 0
+    },
+    "floorCalls": {
+      "type": "number",
+      "title": "Floor payback (calls)",
+      "description": "The floor is the context size at which compacting pays back within this many later calls. At least 2",
+      "default": 20
+    },
+    "nodeCalls": {
+      "type": "number",
+      "title": "Node payback (calls)",
+      "description": "Any clean node may compact from the size that pays back within this many calls. At least 2",
       "default": 10
     },
-    "minSavingK": {
+    "workCalls": {
       "type": "number",
-      "title": "Minimum saving (k tokens)",
-      "description": "compact_now is denied unless the estimated post-compaction size (baseline + 20k) leaves at least this many thousand tokens to free. Scales the floor to small windows",
-      "default": 40
+      "title": "Work payback (calls)",
+      "description": "The turn-end self-check treats a block of work as a node from the size that pays back within this many calls. At least 2",
+      "default": 8
     },
-    "nudgeStartPct": {
+    "urgentK": {
       "type": "number",
-      "title": "Start nudging (%)",
-      "description": "Context percentage at which Claude starts being reminded to look for a node",
-      "default": 20
+      "title": "Urgent size (k tokens)",
+      "description": "From this size (capped at 80% of the window) the reminder escalates to compacting at the next safe step; every other tier is capped at it. Minimum 50",
+      "default": 350
+    },
+    "compactCostK": {
+      "type": "number",
+      "title": "Compaction cost (k tokens)",
+      "description": "Fixed cost of one compaction (summary plus re-caching) in the payback formula. Minimum 1",
+      "default": 105
     },
     "nudgeStepPct": {
       "type": "number",
       "title": "Nudge step (%)",
       "description": "Remind again after each further rise of this many percentage points",
       "default": 5
-    },
-    "urgentPct": {
-      "type": "number",
-      "title": "Urgent nudge (%)",
-      "description": "From this percentage the reminder escalates to compacting at the next safe step",
-      "default": 35
     },
     "enabled": {
       "type": "boolean",

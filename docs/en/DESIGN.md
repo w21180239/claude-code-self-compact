@@ -59,42 +59,46 @@ All per-conversation state (queue, baseline, counters, pending notes) is reset a
 
 ## Gate
 
-The plugin refuses the call unless both conditions hold:
+The plugin refuses the call when `tokens < floor`. Every tier is derived from P, the learned post-compact size, and the payback formula in the cost model below:
 
-1. `tokens >= floorPct% x window`
-2. `tokens >= baseline + 20k + minSavingK x 1k`, where `baseline` is the context size of the session's first main request, taken only when the conversation has at most 3 messages so a resumed session does not inflate it (65k when unknown), 20k is the allowance for the summary and re-injected files, and `minSavingK` is the saving a compaction must still leave.
+- floor = `max(C(floorCalls), floorPct x window)`, with `floorCalls` 20 and `floorPct` 0 by default
+- node = `C(nodeCalls)`, `nodeCalls` 10
+- work = `C(workCalls)`, `workCalls` 8
+- urgent = `min(urgentK x 1k, 0.8 x window)`, `urgentK` 350
 
-Both reduce to one threshold: `need = max(floorPct x window, baseline + 20k + minSavingK x 1k)`.
+Floor, node and work are each capped at urgent, so on a small window the tiers collapse toward the urgent size and the tool still opens. After capping, every tier is raised to at least `P + 25k` (`MIN_GAIN_K`), so a compaction always frees 25k or more and the context cannot re-trip a tier right after it. Below the floor the call is denied; from floor to node only a major phase handoff passes; from node any clean node passes; from urgent the nudge says to compact at the next safe step.
 
 `tokens` comes from the engine's reading of the session's context (`$.session.usage()`), which is the usage on the newest assistant message. The Anthropic API sends the input counts in the stream's opening `message_start` event. Some Anthropic-compatible gateways send zeros there and the real counts only in the closing `message_delta`; OpenCode Go serving DeepSeek does this. The engine writes the corrected usage back when `message_delta` arrives, so the transcript and later turns are right, but a tool call made while the response is still streaming reads the zero snapshot and the engine reports no tokens. The gate then falls back to the total of the last main-loop request's usage, which the plugin reads on every `turn.step` anyway. That total trails the live context by one request (its output and tool results), so the fallback errs toward denying. A step reporting all-zero usage leaves the fallback unchanged. Any main-session compaction (the plugin's, auto-compact or `/compact`) replaces it with the compaction's reported size, or clears it when there is none, and session boundaries clear it, so a stale pre-compaction size never passes the gate.
 
-With the defaults and a 65k baseline, `need = 125k`. On a 1M window that is 12.5%, so the 10% floor and the saving rule agree within 2.5 points. On a 200k window it is 62.5%, so small windows are no longer shut outright; in 0.2.0 the 55% post/pre ratio demanded 77% fill there.
-
-Why an absolute saving: a compaction leaves about 21k behind (median `postTokens` over 83 compactions in the author's history). Compacting frees `tokens - 21k`, and the freeing has to pay for the summary. Stating that in tokens keeps the rule the same on every window size, which the earlier window-share ratio did not.
-
 ### Cost model
 
-Relative to the input price: cache read 0.1x, 1-hour cache write 2x, output 5x. One compaction costs about `0.1 x C + 105k` input-equivalent tokens, where `C` is the context size and 105k is a conservative fixed estimate of generating the summary and re-caching. After it, each call saves `0.1 x (C - 20k)`, with 20k the measured median that remains.
+Relative to the input price: cache read 0.1x, 1-hour cache write 2x, output 5x. One compaction costs about `F + 0.1 x C` input-token equivalents, where `F` is `compactCostK` (default 105k, a conservative fixed estimate of generating the summary and re-caching) and `0.1 x C` is the cache read of the context being compacted. Not compacting costs `0.1 x (C - P)` more on every later call, with `C` the current context and `P` the post-compact size. Compacting pays back within `N` calls when `N x 0.1 x (C - P) >= F + 0.1 x C`:
 
-| Context before | Cost of compacting | Saved per call | Break-even |
+`C(N) = (10 x F + N x P) / (N - 1)`
+
+| P | C(8) | C(10) | C(20) |
 | --- | --- | --- | --- |
-| 100k | 115k | 8k | about 14 calls |
-| 150k | 120k | 13k | about 9 calls |
-| 200k | 125k | 18k | about 7 calls |
+| 65k | 224k | 189k | 124k |
+| 87k | 249k | 213k | 147k |
+| 120k | 287k | 250k | 182k |
 
-A compaction takes 30-55 seconds on the measured setup. The model is an estimate; `log.jsonl` records before and after percentages so you can check it against your own sessions.
+**Learning P.** The first main step after each compaction measures the real post-compact size (`pSample` in `log.jsonl`; `afterPct` is the summary size the compaction reported, not the size of the next request). `profile.json` under `~/.claude/self-compact/` keeps an exponentially weighted average (alpha 0.3) per project and globally. A sample more than 50% off the average is an outlier and moves it with alpha 0.1; three consecutive outliers in the same direction reset the average to their mean (n = 3). An estimate is trusted at n >= 3. Fallback order: this session's sample, the project estimate, the global estimate, then session baseline + 25k (baseline 65k when unknown, so 90k). The tool is registered once; a `tool.describe` hook renders its description with the tiers in tokens for the current P, and each learned sample invalidates the cached description. The engine sends the new text at the next compaction, so the description lags P by one compaction and the prompt cache is kept (no `breakPromptCache`).
+
+**Heavy harness.** When `C(workCalls)` is at least `urgentK` before clamping, a large harness (MCP, skills) makes compaction pay little. The plugin tells Claude once per session and suggests trimming MCP servers or skills.
+
+A compaction takes 30-55 seconds on the measured setup. The model is an estimate; `log.jsonl` records the sizes so you can check it against your own sessions.
 
 ## Tiers
 
 | Context | Behavior |
 | --- | --- |
-| below the floor | denied by the plugin |
-| 10-15% | big phase handoffs only, with a clearly long next phase |
-| 15% and up | any clean node |
-| 20% and up | nudges start, then every 5% |
-| 35% and up | nudge wording escalates: compact at the next safe step |
+| below the floor `C(floorCalls)` | denied by the plugin |
+| floor to node `C(nodeCalls)` | big phase handoffs only, with a clearly long next phase |
+| node and up | any clean node |
+| node and up, then every `nudgeStepPct` | nudges |
+| urgent and up | nudge wording escalates: compact at the next safe step |
 
-The tiers are in the tool description, so Claude sees them on every turn. Only the floor is enforced mechanically. The nudge start is `max(nudgeStartPct, floorPct)` so a nudge never appears below the floor.
+The tiers are in the tool description, so Claude sees them on every turn. Only the floor is enforced mechanically. Nudges start at `max(node, floor)`, so a nudge never appears below the floor.
 
 ## Nodes and anti-nodes
 
@@ -158,7 +162,7 @@ Post-compact context is carried by the continuation prompt (standing orders and 
 
 ## Nudges
 
-Each main-session step reads usage. Once usage passes the nudge start, and then after every further `nudgeStepPct`, one line with the current percentage is attached to the next text tool result, or to the next prompt's context if no text result comes first. Crossing `urgentPct` escalates immediately. Nudges stay silent while a request is queued or compacting, inside subagents, in non-interactive sessions and when the plugin is disabled. A missed nudge is acceptable: auto-compact is still the backstop above 35%.
+Each main-session step reads usage. Once usage passes the nudge start (`max(node, floor)`), and then after every further `nudgeStepPct`, one line with the current percentage is attached to the next text tool result, or to the next prompt's context if no text result comes first. Crossing the urgent size escalates immediately. Nudges stay silent while a request is queued or compacting, inside subagents, in non-interactive sessions and when the plugin is disabled. A missed nudge is acceptable: auto-compact is still the backstop above the urgent size.
 
 ## Autonomous triggers
 
@@ -166,9 +170,9 @@ A live test showed that the tool description alone never triggers a compaction: 
 
 **Node signals.** `detectNode(tool, input, result)` is a pure function over a finished main-session, non-error tool call. Strong: `git push`, `git merge`, PR/MR create, review, comment, close or merge, `gh issue comment`/`close`, `git tag`, an outbound message through `gog`, `agent-slack`, `slack` or `outlook` (`send`, `reply`, `post`), a write to a `specs/` or `plans/` markdown file or to a file named `HANDOFF*`/`handoff*`, a todo list whose items are all completed. Weak: `git commit`, a passing test command (`npm/pnpm/yarn/bun test`, `pytest`, `go test`, `cargo test`, `dotnet test`, `mvn`, `gradle`, `make test`/`check`), a new `.md` file, a background agent launch, a foreground subagent returning.
 
-**Mid-turn flag.** When the gate passes, nothing is pending, and the signal is strong or the context is at least `floorPct + 5`, one line rides that tool's text result (the next prompt context otherwise). It names the node, states the context percentage and tells Claude to call `compact_now` before the turn ends if the phase is closed and no answer is awaited. One flag per turn.
+**Mid-turn flag.** When the gate passes, nothing is pending, and the signal is strong, or weak with the context at or above the node tier, one line rides that tool's text result (the next prompt context otherwise). It names the node, states the context percentage and tells Claude to call `compact_now` before the turn ends if the phase is closed and no answer is awaited. One flag per turn.
 
-**Turn-end self-check.** The fallback that makes the loop automatic. On a main `turn.complete` (not aborted, interactive, gate open, nothing pending) the plugin checks, in order, for a node signal this turn, for a turn that did real work (`WORK_TURN_MIN_CALLS = 2` main-session tool calls) with the context at or above `nudgeStartPct - 5`, or for a context at or above `nudgeStartPct` with no compaction. Only `AskUserQuestion` suppresses the check; a trailing `?` does not, because completion summaries often end with a question and the history shows compactions at exactly those points. A check is limited to one per trigger per 5 points of growth and never follows another check without tool activity in between. After the usual 1.5 s debounce and idle, the plugin submits one prompt: call `compact_now` if the phase is closed (`next` then states how to handle the user's latest message, or gives a one-line recap, when nothing continues by itself), otherwise answer "skip". The log records `self-check`, then `self-check:compacted` or `self-check:declined` for the following turn. `turnEndCheck=false` disables only this trigger.
+**Turn-end self-check.** The fallback that makes the loop automatic. On a main `turn.complete` (not aborted, interactive, gate open, nothing pending) the plugin checks, in order, for a node signal this turn, for a turn that did real work (`WORK_TURN_MIN_CALLS = 2` main-session tool calls) with the context at or above the work tier `C(workCalls)`, or for a context at or above the node tier with no compaction. A strong node signal needs the floor, a weak one the node tier. Only `AskUserQuestion` suppresses the check; a trailing `?` does not, because completion summaries often end with a question and the history shows compactions at exactly those points. A check is limited to one per trigger per 5 points of growth and never follows another check without tool activity in between. After the usual 1.5 s debounce and idle, the plugin submits one prompt: call `compact_now` if the phase is closed (`next` then states how to handle the user's latest message, or gives a one-line recap, when nothing continues by itself), otherwise answer `skip: <one-line reason>`. The thresholds are a necessary condition only: past them the model compacts only when all three hold: (1) the current block is closed, (2) the next work does not depend on large raw text in the context (a diff being compared line by line, a long file just read), (3) enough work remains to repay a compaction. The urgent nudge keeps only criterion 1 as a veto. The log records `self-check`, then `self-check:compacted` or `self-check:declined` for the following turn; a declined row carries the skip `reason` (text after `skip:`, cut to 200 characters; a bare "skip" has none). `turnEndCheck=false` disables only this trigger.
 
 **Block-start hint.** On any human prompt (composer or bridge) with the gate open and nothing pending, a model-only line suggests calling `compact_now` first when the message opens a new block of work (a different topic, or picking the work up after a pause) and the previous block is closed, with `next` carrying the gist of the new request. Gating this on a topic change alone missed the pause case: the history is full of `/compact` typed right after a block ended and before the next instruction.
 
@@ -176,11 +180,11 @@ Every successful compaction ends with the continuation prompt, whether it was re
 
 ## Data
 
-`~/.claude/self-compact/<session-id>/handoff-<n>.md`, `~/.claude/self-compact/<session-id>/intent.md` and `~/.claude/self-compact/log.jsonl`. Mods cannot import `node:fs`, so files go through the engine's `$.fs`. Nothing leaves the machine and the plugin makes no network calls.
+`~/.claude/self-compact/<session-id>/handoff-<n>.md`, `~/.claude/self-compact/<session-id>/intent.md`, `~/.claude/self-compact/profile.json` and `~/.claude/self-compact/log.jsonl`. `profile.json` holds the learned post-compact size P per project (keyed by absolute cwd path) and globally. `log.jsonl` rows may carry `pSample` and `p`, and `result` also takes `p-sample`, `deprecated` and `tool-describe`. Mods cannot import `node:fs`, so files go through the engine's `$.fs`. Nothing leaves the machine and the plugin makes no network calls.
 
 Past about 2 MB, `log.jsonl` is moved to `log.1.jsonl` and a new file starts. A log that cannot be read is left untouched rather than overwritten.
 
-`log.jsonl` has one JSON line per request: `ts`, `session`, `node`, `pct` (usage at request), `result` (`queued`, `denied:<why>`, `done`, `preempted`, `aborted`, `stale`, `failed`, `error`), an optional `reason`, `beforePct`, `afterPct` and `durationMs`.
+`log.jsonl` has one JSON line per request: `ts`, `session`, `node`, `pct` (usage at request), `result` (`queued`, `denied:<why>`, `done`, `preempted`, `aborted`, `stale`, `failed`, `error`, `p-sample`, `deprecated`, `tool-describe`, `self-check`, `self-check:compacted`, `self-check:declined`), an optional `reason` (on `self-check:declined`, the model's skip reason, at most 200 characters), optional `pSample` and `p`, `beforePct`, `afterPct` and `durationMs`.
 
 ## Language
 
