@@ -764,6 +764,8 @@ type State = {
   sessionP?: number
   awaitingPSample: boolean
   heavyNoted: boolean
+  /** Last window read by usageOf; the describe hook cannot read usage itself (breakdown re-enters it). Survives resets: the window is not per-conversation. */
+  window?: number
   // Context tokens of the last main-loop request, for when the engine cannot measure.
   lastStepTokens?: number
   seq: number
@@ -1186,26 +1188,19 @@ export const BASELINE_MAX_MESSAGES = 3
 async function usageOf($: Dollar): Promise<Usage> {
   const { context } = await $.session.usage({ breakdown: 'summary' })
   const max = context.breakdown?.maxTokens
-  return contextOf({ tokens: context.tokens, window: typeof max === 'number' && max > 0 ? max : context.window })
+  const window = typeof max === 'number' && max > 0 ? max : context.window
+  if (window) state.window = window
+  return contextOf({ tokens: context.tokens, window })
 }
 
 /** Registers compact_now; the `tool.describe` hook keeps its text current. */
 async function registerTool($: Dollar): Promise<void> {
   await $.tool.register({
     name: TOOL,
-    description: S().description(state.cfg, currentThresholds(await windowOf($))),
+    description: S().description(state.cfg, currentThresholds(state.window ?? REF_WINDOW)),
     inputSchema: inputSchema(S()),
     isDeferred: false,
   })
-}
-
-/** The compaction window, else the reference window where usage is not readable yet. */
-async function windowOf($: Dollar): Promise<number> {
-  try {
-    return (await usageOf($)).window ?? REF_WINDOW
-  } catch {
-    return REF_WINDOW
-  }
 }
 
 /** Folds the first main step after a compaction into the profile and the session's P. */
@@ -1399,11 +1394,20 @@ export const register: Register = (on, options) => {
     return next(e)
   })
 
+  let describing = false
+
   // The engine caches the answer until `$.ui.invalidate('tool.describe')`; a changed one reaches the model at the next compaction.
   on('tool.describe', { tool: TOOL_FULL }, async ($, e, next) => {
-    const t = currentThresholds(await windowOf($))
-    await logLine($, { result: 'tool-describe', p: t.p })
-    return { ...(await next(e)), description: S().description(state.cfg, t) }
+    // A nested describe (rendering schemas while this one runs) passes through.
+    if (describing) return next(e)
+    describing = true
+    try {
+      const t = currentThresholds(state.window ?? REF_WINDOW)
+      await logLine($, { result: 'tool-describe', p: t.p })
+      return { ...(await next(e)), description: S().description(state.cfg, t) }
+    } finally {
+      describing = false
+    }
   })
 
   on('session.end', async ($, e, next) => {

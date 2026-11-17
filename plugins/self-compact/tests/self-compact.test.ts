@@ -302,7 +302,9 @@ function engine(
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('session.id', () => ({ value: 'sess1' }))
   const fail = { usage: false, invalidate: false }
-  on('session.usage', () => {
+  const usageCalls: unknown[] = []
+  on('session.usage', async (_, e) => {
+    usageCalls.push(e)
     if (fail.usage) throw new Error('usage unsupported')
     return { value: { startedAt: 0, context: usage, rateLimits: [] } }
   })
@@ -311,7 +313,11 @@ function engine(
     registered.push(e as never)
     return { value: { tool: TOOL_FULL } }
   })
-  on('tool.describe', (_, e) => ({ description: e.description }))
+  const describeHook: { run?: () => Promise<unknown> } = {}
+  on('tool.describe', async (_, e) => {
+    await describeHook.run?.()
+    return { description: e.description }
+  })
   const invalidated: string[] = []
   on('ui.invalidate', (_, e) => {
     if (fail.invalidate) throw new Error("invalidate unsupported")
@@ -381,7 +387,7 @@ function engine(
       .split('\n')
       .filter(Boolean)
       .map(l => JSON.parse(l) as { result: string; session: string; node?: string; pct?: number; reason?: string; beforePct?: number; afterPct?: number; durationMs?: number })
-  return { clock, files, registered, invalidated, statuses, handoffs, log, usage, compactPlan, compactCalls, toasts, submits, wait, step, stopAnswer, fsFlags, messages, fail }
+  return { describeHook, usageCalls, clock, files, registered, invalidated, statuses, handoffs, log, usage, compactPlan, compactCalls, toasts, submits, wait, step, stopAnswer, fsFlags, messages, fail }
 }
 
 const start = ($: Dollar, isInteractive = true) =>
@@ -1894,7 +1900,8 @@ test('tool description: tiers use the real compaction window', async ($, on) => 
   const w = engine(on, { window: 1_000_000, breakdown: { maxTokens: 200_000 } } as never)
   withProject(w, 87_000)
   await start($)
-  expect(w.registered[0].description).toContain('160k (80%)')
+  await modelStep($, w, 65_000)
+  expect((await describeTool($)).description).toContain('160k (80%)')
 })
 
 test('configFrom: deprecated keys logged once at start', { options: { minSavingK: 40, urgentPct: 30 } }, async ($, on) => {
@@ -1981,4 +1988,35 @@ test('learnSample: a throwing ui.invalidate does not stop the rest of the step',
   expect(w.log().some(l => l.result === 'p-sample')).toBe(true)
   expect(w.invalidated).toEqual([])
   expect(await ctxOf($)).toMatch(/is still \d+k/)
+})
+
+test('tool.describe: never reads usage, so a breakdown cannot re-enter it', async ($, on) => {
+  const w = engine(on)
+  await start($)
+  const before = w.usageCalls.length
+  await describeTool($)
+  expect(w.usageCalls.length).toBe(before)
+})
+
+test('tool.describe: re-entrant describe passes through unchanged', async ($, on) => {
+  const w = engine(on)
+  await start($)
+  // Rendering schemas inside describe fires describe again; stop after one nested call.
+  let depth = 0
+  w.describeHook.run = async () => {
+    if (depth++ < 3) await describeTool($)
+  }
+  const r = await describeTool($)
+  expect(r.description).toContain('compact')
+  expect(w.log().filter(l => l.result === 'tool-describe').length).toBe(1)
+})
+
+test('tool.describe: uses the window the last step read', async ($, on) => {
+  const w = engine(on, { tokens: 20_000, window: 100_000 })
+  await start($)
+  const ref = (await describeTool($)).description
+  await modelStep($, w, 20_000)
+  const small = (await describeTool($)).description
+  expect(small).not.toBe(ref)
+  expect(small).toContain('%')
 })
