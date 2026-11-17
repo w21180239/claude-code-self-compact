@@ -93,6 +93,7 @@ type Strings = {
   keep_skills: string
   drop_skills: string
   skillInstruction: (names: string) => string
+  skillMore: (n: number) => string
   contSkills: string
   skillHot: (name: string) => string
   skillRefListed: (path: string) => string
@@ -227,6 +228,7 @@ export const STRINGS: Record<Lang, Strings> = {
     language: 'Fill in the language rules this session actually uses, not global defaults: chat = the conversation language as the user set it, outputs = one rule per channel (code, commit, PR, spec, outgoing text) in the user\'s words.',
     keep_skills: 'Skills (names) whose work continues after this compaction (optional)',
     drop_skills: 'Skills (names) whose work is finished and no longer applies (optional)',
+    skillMore: n => `+${n} more`,
     skillInstruction: names => `Skills in use: ${names}. For each, record in the summary which step of its procedure you reached and what remains.`,
     contSkills: 'Skill working set:',
     skillHot: name => `${name}: still in use`,
@@ -354,6 +356,7 @@ After "Queued", end the turn now: one line, call no more tools.
     language: '填本会话实际在用的语言约定，不是全局默认：chat 写用户设定的对话语言，outputs 每个渠道（代码、commit、PR、spec、对外文字）一条，用用户的原话。',
     keep_skills: '压缩后仍要继续的 skill 名（可选）',
     drop_skills: '已完成、不再适用的 skill 名（可选）',
+    skillMore: n => `等另 ${n} 个`,
     skillInstruction: names => `在用的 skill：${names}。摘要里逐个写明它的工作集：流程走到了哪一步、还剩什么。`,
     contSkills: 'skill 工作集：',
     skillHot: name => `${name}：仍在使用`,
@@ -751,6 +754,9 @@ export function firstUserMessage(msgs: readonly { role: string; text: string }[]
 
 export const INSTRUCTIONS_CAP = 8_000
 
+// The hot-skill line names at most this many skills.
+const MAX_HOT_NAMES = 8
+
 /** Compact instructions within INSTRUCTIONS_CAP: drops `done`, then the oldest user messages, then (last resort) `drop`, `lessons`, the original request, `decisions`, `artifacts`. standing_orders, pending, next, the language rules and the hot-skill line are never trimmed. */
 export function buildInstructions(
   h: Handoff,
@@ -763,7 +769,9 @@ export function buildInstructions(
   const t = STRINGS[lang]
   // Never trimmed: it is what keeps the rules alive through the summariser.
   const langInstruction = hasLang(h.language) ? `${t.langInstruction(h.language.chat === '' ? undefined : h.language.chat)}\n\n` : ''
-  const skillInstruction = hotSkills.length > 0 ? `${t.skillInstruction(hotSkills.join(', '))}\n\n` : ''
+  const shown = hotSkills.slice(0, MAX_HOT_NAMES).join(', ')
+  const listed = hotSkills.length > MAX_HOT_NAMES ? `${shown} ${t.skillMore(hotSkills.length - MAX_HOT_NAMES)}` : shown
+  const skillInstruction = hotSkills.length > 0 ? `${t.skillInstruction(listed)}\n\n` : ''
   const build = (hh: Handoff, msgs: readonly string[], it: string | undefined): string =>
     `${t.preamble}\n\n${langInstruction}${skillInstruction}${renderHandoff(hh, msgs, lang, it)}\n\n${t.tail(handoffPath)}`
   let cur: Handoff = h
@@ -827,18 +835,56 @@ const CHARS_PER_TOKEN = 4
 
 const shortName = (name: string): string => name.slice(name.lastIndexOf(':') + 1)
 
-/** 'main' = the skill's SKILL.md, 'dir' = the dir itself, 'ref' = any other file under it; undefined when the path is elsewhere. */
-function skillPathKind(path: string, short: string): 'main' | 'dir' | 'ref' | undefined {
-  const norm = path.replace(/\\/g, '/')
+export type PathEnv = { cwd?: string; home?: string }
+
+/** Lexically collapses `.`, `..` and `//`, resolving `~` and relative paths against `env`; undefined when the path climbs above its root or `~` has no home. */
+export function normalizePath(path: string, env: PathEnv = {}): string | undefined {
+  let p = path.replace(/\\/g, '/')
+  if (p === '~' || p.startsWith('~/')) {
+    if (!env.home) return undefined
+    p = env.home.replace(/\\/g, '/').replace(/\/+$/, '') + p.slice(1)
+  } else if (!/^([A-Za-z]:)?\//.test(p) && env.cwd) {
+    p = `${env.cwd.replace(/\\/g, '/').replace(/\/+$/, '')}/${p}`
+  }
+  const root = /^([A-Za-z]:)?\//.exec(p)?.[0] ?? ''
+  const segs = p.slice(root.length).split('/')
+  const out: string[] = []
+  for (const s of segs) {
+    if (s === '' || s === '.') continue
+    if (s === '..') {
+      if (out.length === 0) return undefined
+      out.pop()
+    } else out.push(s)
+  }
+  const last = segs[segs.length - 1]
+  const dirLike = last === '' || last === '.' || last === '..'
+  return root + out.join('/') + (dirLike && out.length > 0 ? '/' : '')
+}
+
+type SkillPath = { kind: 'main' | 'dir' | 'ref'; prefix: string }
+
+/** `prefix` is the path up to and including `/skills/<short>/`; kind: 'main' = the skill's SKILL.md, 'dir' = the dir itself, 'ref' = any other file under it. Undefined when the path is elsewhere. */
+function skillPathKind(norm: string, short: string): SkillPath | undefined {
   const marker = `/skills/${short}/`
   const i = norm.indexOf(marker)
   if (i < 0) return undefined
-  const rest = norm.slice(i + marker.length)
-  return rest === '' ? 'dir' : rest === 'SKILL.md' ? 'main' : 'ref'
+  const prefix = norm.slice(0, i + marker.length)
+  const rest = norm.slice(prefix.length)
+  return { prefix, kind: rest === '' ? 'dir' : rest === 'SKILL.md' ? 'main' : 'ref' }
 }
 
 const FILE_LIKE = /^[^*?{}[\]]+\.[A-Za-z0-9]+$/
 const PATH_SPLIT = /[\s'"`<>|;&()=]+/
+
+/** A Bash token without trailing punctuation or a `:<line>[:<col>]` suffix. */
+function cleanToken(t: string): string {
+  let cur = t
+  for (;;) {
+    const next = cur.replace(/[,.;:)'"]+$/, '').replace(/:\d+(:\d+)?$/, '')
+    if (next === cur) return cur
+    cur = next
+  }
+}
 
 /** Paths a main-session tool call touches, with whether each is known to be a file. */
 function touchedPaths(tool: string, args: Record<string, unknown>): { path: string; file: boolean }[] {
@@ -852,34 +898,71 @@ function touchedPaths(tool: string, args: Record<string, unknown>): { path: stri
   if (tool === 'Bash') {
     return str(args.command)
       .flatMap(c => c.split(PATH_SPLIT))
-      .filter(t => t.includes('/skills/'))
+      .filter(t => t.includes('skills/'))
+      .map(cleanToken)
       .map(path => ({ path, file: FILE_LIKE.test(path) }))
   }
   return []
 }
 
-/** Records a main-session Skill load, and any later use of a loaded skill's dir; `skills` is updated in place. */
-export function trackSkillCall(skills: Map<string, SkillUse>, tool: string, input: unknown, nowReq: number): void {
+/** `true` = the prefix holds a SKILL.md, `false` = it does not, `undefined` = not probed yet. */
+export type RootCheck = (prefix: string) => boolean | undefined
+/** A use whose skill dir has not been probed: apply it once `prefix` is confirmed. */
+export type Deferred = { prefix: string; apply: () => void }
+
+/** The loaded skill a path belongs to among those sharing its short name: the one whose plugin segment is in the path, else the latest loaded (Map order). */
+function ownerOf(skills: Map<string, SkillUse>, short: string, prefix: string): SkillUse | undefined {
+  const same = [...skills.values()].filter(s => s.short === short)
+  if (same.length <= 1) return same[0]
+  const segs = prefix.split('/')
+  const byPlugin = same.filter(s => s.name !== s.short && segs.includes(s.name.slice(0, s.name.lastIndexOf(':'))))
+  return (byPlugin.length > 0 ? byPlugin : same).at(-1)
+}
+
+/** Records a main-session Skill load, and any later use of a loaded skill's dir; `skills` is updated in place. A path counts only under a dir `isRoot` confirms; uses under an unprobed dir come back deferred. */
+export function trackSkillCall(
+  skills: Map<string, SkillUse>,
+  tool: string,
+  input: unknown,
+  nowReq: number,
+  isRoot: RootCheck,
+  env: PathEnv = {},
+): Deferred[] {
   const flat = asObj(input) ?? {}
   const args = asObj(flat.input) ?? flat
   if (tool === 'Skill') {
     const raw = args.skill ?? args.name
     const name = typeof raw === 'string' ? raw.trim() : ''
-    if (name === '') return
+    if (name === '') return []
     const prev = skills.get(name)
-    if (prev !== undefined) prev.lastUse = nowReq
-    else skills.set(name, { name, short: shortName(name), lastUse: nowReq, refs: [] })
-    return
+    if (prev !== undefined) {
+      prev.lastUse = nowReq
+      // Re-insert so Map order stays load order: a collision goes to the latest load.
+      skills.delete(name)
+      skills.set(name, prev)
+    } else skills.set(name, { name, short: shortName(name), lastUse: nowReq, refs: [] })
+    return []
   }
-  if (skills.size === 0) return
+  if (skills.size === 0) return []
+  const deferred: Deferred[] = []
   for (const { path, file } of touchedPaths(tool, args)) {
-    for (const s of skills.values()) {
-      const kind = skillPathKind(path, s.short)
-      if (kind === undefined) continue
-      s.lastUse = nowReq
-      if (kind === 'ref' && file) s.refs = [path, ...s.refs.filter(r => r !== path)].slice(0, MAX_REFS)
+    const norm = normalizePath(path, env)
+    if (norm === undefined) continue
+    for (const short of new Set([...skills.values()].map(s => s.short))) {
+      const hit = skillPathKind(norm, short)
+      if (hit === undefined) continue
+      const s = ownerOf(skills, short, hit.prefix)
+      if (s === undefined) continue
+      const apply = (): void => {
+        s.lastUse = nowReq
+        if (hit.kind === 'ref' && file) s.refs = [norm, ...s.refs.filter(r => r !== norm)].slice(0, MAX_REFS)
+      }
+      const root = isRoot(hit.prefix)
+      if (root === true) apply()
+      else if (root === undefined) deferred.push({ prefix: hit.prefix, apply })
     }
   }
+  return deferred
 }
 
 const named = (list: readonly string[], s: SkillUse): boolean => list.some(x => x === s.name || x === s.short)
@@ -1110,6 +1193,11 @@ type State = {
   // Skills loaded this session by name, the main-request counter, and the last compaction's snapshot for ref-miss learning.
   skills: Map<string, SkillUse>
   reqs: number
+  // Skill dirs probed for a SKILL.md (prefix -> found), the tracking queue while a probe runs, and the home dir for `~` paths.
+  roots: Map<string, boolean>
+  trackQueue: Promise<void>
+  trackPending: number
+  home?: string
   post?: PostCompact
 }
 
@@ -1140,6 +1228,9 @@ export const state: State = {
   langTurns: 0,
   skills: new Map(),
   reqs: 0,
+  roots: new Map(),
+  trackQueue: Promise.resolve(),
+  trackPending: 0,
 }
 
 const str = { type: 'string' }
@@ -1383,6 +1474,7 @@ async function handleCompact($: Dollar, input: Record<string, unknown>, isSub: b
   } catch (err) {
     return deny(S().denyWriteFailed(String(err)), 'write-failed', node, g.pct)
   }
+  await state.trackQueue
   const tiers = tierSkills([...state.skills.values()], h.keep_skills ?? [], h.drop_skills ?? [], state.reqs, state.cfg.hotWindow, state.profile.skills ?? {})
   state.seq = n
   state.lang = h.language
@@ -1475,6 +1567,7 @@ async function giveUp($: Dollar, p: Pending, reason: string): Promise<void> {
 
 /** A compaction happened: count it for every loaded skill and snapshot their refs for miss learning. */
 async function noteCompaction($: Dollar): Promise<void> {
+  await state.trackQueue
   const loaded = [...state.skills.values()]
   state.post = { at: state.reqs, refs: new Map(loaded.map(s => [s.name, new Set(s.refs)])), inlined: new Set() }
   const names = loaded.map(s => s.name).filter(n => n !== '__proto__')
@@ -1489,20 +1582,48 @@ async function noteCompaction($: Dollar): Promise<void> {
 
 /** The resume message's skill section for a queued compaction: reads the hot refs, notes which were inlined, and builds the log field. */
 async function skillOutcome($: Dollar, p: Pending): Promise<{ text?: string; log?: NonNullable<LogLine['skills']> }> {
+  await state.trackQueue
   const { hot, done } = p.tiers
   if (hot.length === 0 && done.length === 0) return {}
   const cfg = state.cfg
-  const readRef = async (path: string): Promise<string | undefined> => {
-    if (cfg.refInlineK <= 0 || cfg.skillBudgetK <= 0) return undefined
+  const maxBytes = cfg.refInlineK * 1000 * CHARS_PER_TOKEN
+  const budgetBytes = cfg.skillBudgetK * 1000 * CHARS_PER_TOKEN
+  let usedBytes = 0
+  const realRoots = new Map<string, string | undefined>()
+  // The skill dir's real location with a trailing slash; undefined when it cannot be resolved.
+  const realRoot = async (prefix: string): Promise<string | undefined> => {
+    if (!realRoots.has(prefix)) {
+      const st = await $.fs.stat(prefix, { resolve: true }).catch(() => undefined)
+      const real = st?.kind === 'dir' && st.realPath !== undefined ? normalizePath(st.realPath) : undefined
+      realRoots.set(prefix, real === undefined ? undefined : real.replace(/\/*$/, '/'))
+    }
+    return realRoots.get(prefix)
+  }
+  /** Reads a ref only when a stat says it is a file within refInlineK and the budget left, and its real path stays inside the skill dir. */
+  const readRef = async (s: SkillUse, path: string): Promise<string | undefined> => {
+    if (maxBytes <= 0 || budgetBytes <= 0 || usedBytes >= budgetBytes) return undefined
     try {
-      const body = await $.fs.read(path)
-      return typeof body === 'string' ? body : undefined
+      const hit = skillPathKind(path, s.short)
+      if (hit?.kind !== 'ref') return undefined
+      const st = await $.fs.stat(path, { resolve: true })
+      if (st.kind !== 'file' || st.size > maxBytes || usedBytes + st.size > budgetBytes || st.realPath === undefined) return undefined
+      const real = normalizePath(st.realPath)
+      const root = await realRoot(hit.prefix)
+      if (real === undefined || root === undefined || !real.startsWith(root) || skillPathKind(real, s.short) === undefined) return undefined
+      const body = await $.fs.read(real, { length: maxBytes })
+      if (typeof body !== 'string') return undefined
+      usedBytes += st.size
+      return body
     } catch {
       return undefined
     }
   }
   const hotRefs: HotSkill[] = []
-  for (const s of hot) hotRefs.push({ name: s.name, refs: await Promise.all(s.refs.map(async path => ({ path, content: await readRef(path) }))) })
+  for (const s of hot) {
+    const refs: HotSkill['refs'] = []
+    for (const path of s.refs) refs.push({ path, content: await readRef(s, path) })
+    hotRefs.push({ name: s.name, refs })
+  }
   const section = renderSkillSection(hotRefs, done.map(s => s.name), cfg.language, cfg.refInlineK, cfg.skillBudgetK)
   if (section === undefined) return {}
   if (state.post !== undefined) state.post.inlined = new Set(section.inlined)
@@ -1510,9 +1631,11 @@ async function skillOutcome($: Dollar, p: Pending): Promise<{ text?: string; log
 }
 
 /** A main Read soon after a compaction: of an inlined ref it is a reread, of a listed one a miss that feeds the skill's prior. */
-async function learnRefRead($: Dollar, path: string): Promise<void> {
+async function learnRefRead($: Dollar, raw: string, env: PathEnv): Promise<void> {
   const post = state.post
   if (post === undefined || state.reqs - post.at > MISS_WINDOW) return
+  const path = normalizePath(raw, env)
+  if (path === undefined) return
   for (const [skill, refs] of post.refs) {
     if (!refs.has(path)) continue
     if (post.inlined.has(path)) {
@@ -1718,20 +1841,49 @@ function resetConversation(): void {
   state.langTurns = 0
   state.driftExpect = undefined
   state.skills.clear()
+  state.roots.clear()
   state.reqs = 0
   state.post = undefined
 }
 
-/** Main-session tool call: learn from a ref read after a compaction, then track skill loads and use. */
-async function trackSkills($: Dollar, e: Record<string, unknown>): Promise<void> {
-  const tool = String(e.tool)
-  if (tool === 'Read') {
-    const path = asObj(e.input)?.file_path ?? e.file_path
-    if (typeof path === 'string') await learnRefRead($, path)
-  }
-  trackSkillCall(state.skills, tool, e, state.reqs)
+/** Cwd and home for resolving relative and `~` paths. */
+async function pathEnv($: Dollar): Promise<PathEnv> {
+  state.home ??= (await $.env.get('HOME')) || (await $.env.get('USERPROFILE')) || undefined
+  return { cwd: state.cwd, home: state.home }
 }
 
+/** Probes a skill dir once: it counts only when it holds a SKILL.md (a failed stat is remembered as not a skill). */
+async function probeRoot($: Dollar, prefix: string): Promise<void> {
+  if (state.roots.has(prefix)) return
+  state.roots.set(prefix, await $.fs.stat(`${prefix}SKILL.md`).then(s => s.kind === 'file', () => false))
+}
+
+/** Main-session tool call: learn from a ref read after a compaction, then track skill loads and use. A use under an unprobed skill dir settles off the call path; the queue keeps order. */
+async function trackSkills($: Dollar, e: Record<string, unknown>): Promise<void> {
+  const tool = String(e.tool)
+  const env = await pathEnv($)
+  if (tool === 'Read') {
+    const path = asObj(e.input)?.file_path ?? e.file_path
+    if (typeof path === 'string') await learnRefRead($, path, env)
+  }
+  const nowReq = state.reqs
+  const settle = async (deferred: Deferred[]): Promise<void> => {
+    for (const d of deferred) {
+      await probeRoot($, d.prefix)
+      if (state.roots.get(d.prefix) === true) d.apply()
+    }
+  }
+  const run = (): Deferred[] => trackSkillCall(state.skills, tool, e, nowReq, p => state.roots.get(p), env)
+  const enqueue = (job: () => Promise<void>): void => {
+    state.trackPending++
+    state.trackQueue = state.trackQueue.then(job).catch(() => undefined).finally(() => void state.trackPending--)
+  }
+  if (state.trackPending > 0) enqueue(() => settle(run()))
+  else {
+    const deferred = run()
+    if (deferred.length > 0) enqueue(() => settle(deferred))
+  }
+}
 // ---- autonomous triggers: node nudge, turn-end self-check, topic switch ----
 
 // One self-check per node kind per this much context growth.

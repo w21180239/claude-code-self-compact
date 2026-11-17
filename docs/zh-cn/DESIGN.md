@@ -133,11 +133,11 @@ floor、node、work 都被 urgent 截顶，所以小窗口里各档向紧急档�
 
 压缩之后，引擎会自己把每个调用过的 skill 的完整正文重新注入（`invoked_skills` 附件，未见截断）。mod 看不到也改不了：托管登录会跳过用户 mod 的 `prompt.attachment` 和 `skill.prompt` 钩子。所以插件不改写这一步重新注入，只用 `tool.call`。压缩丢掉的是 skill 的工作集：在 skill 目录下读过的参考文件，以及工作做到流程的哪一步。压缩后的重读集中在这些参考文件上。
 
-**记录。** 按 skill 名存会话状态（名字取 `Skill` 调用时的写法；短名是最后一个冒号之后的部分，用来匹配路径）。主会话的 `Skill` 调用记下名字和当前主请求序号（`state.reqs`，每个主 `turn.step` 加一）。主会话 Read、Grep、Glob、Edit、Write 的路径，或 Bash 命令里的路径样 token，含 `/skills/<短名>/` 时更新 `lastUse`；不是该目录的 `SKILL.md` 也不是目录的话，移到 `refs` 最前（最多 8 个，去重）。带 `agentId` 的调用忽略。状态跨压缩保留，由 `resetConversation` 清除。
+**记录。** 按 skill 名存会话状态（名字取 `Skill` 调用时的写法；短名是最后一个冒号之后的部分，用来匹配路径）。主会话的 `Skill` 调用记下名字和当前主请求序号（`state.reqs`，每个主 `turn.step` 加一）。主会话 Read、Grep、Glob、Edit、Write 的路径，或 Bash 命令里的路径样 token，含 `/skills/<短名>/` 时更新 `lastUse`；不是该目录的 `SKILL.md` 也不是目录的话，移到 `refs` 最前（最多 8 个，去重）。路径先按词法规范化（`normalizePath`：折叠 `.`、`..`、`//`，`~` 和相对路径按 home、cwd 解析；仍然越出根的丢弃）。只有 `/skills/<短名>/` 之前的前缀下存在 `SKILL.md` 才算：用 `$.fs.stat` 在调用路径之外探测（排队保序；stat 失败即记为非 skill 目录）。两个已加载 skill 短名相同时，路径里出现名字的插件段者胜，否则归最近加载的。Bash token 先去掉末尾标点和 `:<行>[:<列>]` 后缀。带 `agentId` 的调用忽略。状态跨压缩保留，由 `resetConversation` 清除。
 
 **分档**（`tierSkills`）。`keep_skills` 里的为热。否则在 `drop_skills` 里的为已完成：模型说这个 skill 做完了，比最近用过更优先。否则 `nowReq - lastUse <= hotWindow`，或历史 `refMisses / compactions >= 0.3` 且 `compactions >= 3`，为热。其余不处理。`keep_skills` 和 `drop_skills` 是可选的字符串数组（全名或短名都行），格式不对按没给处理。
 
-**载体。** 压缩指令多一句不会被截断的话，点出热 skill，要求 summarizer 为每个写明走到哪一步、还剩什么。续接消息在语言行和 `next` 之后多一节「skill 工作集」（`renderSkillSection`）：每个热 skill 一行 `<名字>：仍在使用` 加它的参考文件，大小不超过 `refInlineK` 千 token（每 token 按 4 字符）且累计不超过 `skillBudgetK` 的用 `$.fs` 读出内联，其余只列路径（读失败也只列路径）；每个已完成 skill 一行。没有热也没有已完成的 skill 时整节省略。
+**载体。** 压缩指令多一句不会被截断的话，点出热 skill，要求 summarizer 为每个写明走到哪一步、还剩什么。续接消息在语言行和 `next` 之后多一节「skill 工作集」（`renderSkillSection`）：每个热 skill 一行 `<名字>：仍在使用` 加它的参考文件，大小不超过 `refInlineK` 千 token（每 token 按 4 字符）且累计不超过 `skillBudgetK` 的用 `$.fs` 读出内联，其余只列路径（读失败也只列路径）。读之前先 `$.fs.stat` 定大小，超过 `refInlineK` 的文件从不读取；按新近顺序依次读，预算用完即停；只有 `realPath` 仍在 skill 目录自身的真实根内、且含 `/skills/<短名>/` 才读，否则只列路径。指令那一句最多点 8 个热 skill（`等另 N 个`）；每个已完成 skill 一行。没有热也没有已完成的 skill 时整节省略。
 
 **学习。** 每次压缩（无论是插件发起还是自动/手动）给 `profile.json` 里每个已加载的 skill 的 `compactions` 加一（`skills: { <名字>: { compactions, refMisses } }`，写法同 P）。之后 30 个主请求内，主会话 Read 了没内联的参考文件，该 skill 的 `refMisses` 加一（每个文件一次）并记 `skill-ref-miss`；Read 已内联的文件记 `skill-ref-reread`。`done` 和 `preempted` 行带 `skills: { hot, done, inlinedK, listed }`。
 

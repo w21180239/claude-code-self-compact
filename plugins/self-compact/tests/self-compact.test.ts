@@ -25,6 +25,7 @@ import {
   detectChatLang,
   mergeLanguage,
   trackSkillCall,
+  normalizePath,
   tierSkills,
   renderSkillSection,
 } from '../hooks/register'
@@ -334,9 +335,21 @@ function engine(
     return { value: undefined }
   })
   const fsFlags = { failRead: false }
+  // Paths read through $.fs.read, and symlink targets for $.fs.stat's realPath.
+  const reads: string[] = []
+  const links = new Map<string, string>()
   on('fs.read', (_, e) => {
+    if (!key(e.path).includes('/self-compact/')) reads.push(key(e.path))
     if (fsFlags.failRead) return { deny: 'EIO' }
     return files.has(key(e.path)) ? { value: files.get(key(e.path)) as string } : { deny: 'ENOENT' }
+  })
+  on('fs.stat', (_, e) => {
+    const p = key(e.path).replace(/\/+$/, '')
+    const target = links.get(p) ?? p
+    const real = e.resolve ? { realPath: target } : {}
+    if (files.has(target)) return { value: { kind: 'file' as const, size: (files.get(target) as string).length, mtimeMs: 0, isLink: target !== p, ...real } }
+    if ([...files.keys()].some(k => k.startsWith(`${target}/`))) return { value: { kind: 'dir' as const, size: 0, mtimeMs: 0, isLink: target !== p, ...real } }
+    return { deny: 'ENOENT' }
   })
   on('fs.exists', (_, e) => ({ value: files.has(key(e.path)) }))
   on('ui.status', (_, e) => {
@@ -392,7 +405,7 @@ function engine(
       .split('\n')
       .filter(Boolean)
       .map(l => JSON.parse(l) as { result: string; session: string; node?: string; pct?: number; reason?: string; beforePct?: number; afterPct?: number; durationMs?: number })
-  return { describeHook, usageCalls, clock, files, registered, invalidated, statuses, handoffs, log, usage, compactPlan, compactCalls, toasts, submits, wait, step, stopAnswer, fsFlags, messages, fail }
+  return { describeHook, usageCalls, clock, files, registered, invalidated, statuses, handoffs, log, usage, compactPlan, compactCalls, toasts, submits, wait, step, stopAnswer, fsFlags, reads, links, messages, fail }
 }
 
 const start = ($: Dollar, isInteractive = true) =>
@@ -2294,65 +2307,142 @@ test('language: an English chat with an English reply is no drift; a Chinese rep
 // ---- skill working set (S2) ----
 
 const SKS = '/home/u/.claude/skills'
+const ALL_ROOTS = () => true
+const track = (m: Map<string, SkillUse>, tool: string, input: unknown, n: number) => trackSkillCall(m, tool, input, n, ALL_ROOTS)
 const mkSkill = (name: string, lastUse: number, refs: string[] = []): SkillUse => ({ name, short: name.slice(name.lastIndexOf(':') + 1), lastUse, refs })
 
 test('trackSkillCall: a Skill call records the name and request; the short name is the part after the last colon', () => {
   const m = new Map<string, SkillUse>()
-  trackSkillCall(m, 'Skill', { skill: 'plug:voice' }, 7)
+  track(m, 'Skill', { skill: 'plug:voice' }, 7)
   expect(m.get('plug:voice')).toEqual({ name: 'plug:voice', short: 'voice', lastUse: 7, refs: [] })
-  trackSkillCall(m, 'Skill', { skill: 'plug:voice' }, 12)
+  track(m, 'Skill', { skill: 'plug:voice' }, 12)
   expect(m.get('plug:voice')?.lastUse).toBe(12)
-  trackSkillCall(m, 'Skill', { input: { skill: 'plain' } }, 13)
+  track(m, 'Skill', { input: { skill: 'plain' } }, 13)
   expect(m.get('plain')?.short).toBe('plain')
-  trackSkillCall(m, 'Skill', { skill: '  ' }, 14)
+  track(m, 'Skill', { skill: '  ' }, 14)
   expect(m.size).toBe(2)
 })
 
 test('trackSkillCall: a Read under /skills/<short>/ adds a ref and counts as use; SKILL.md is use, not a ref', () => {
   const m = new Map<string, SkillUse>()
-  trackSkillCall(m, 'Skill', { skill: 'plug:voice' }, 1)
-  trackSkillCall(m, 'Read', { file_path: `${SKS}/voice/references/voice.md` }, 5)
+  track(m, 'Skill', { skill: 'plug:voice' }, 1)
+  track(m, 'Read', { file_path: `${SKS}/voice/references/voice.md` }, 5)
   expect(m.get('plug:voice')).toMatchObject({ lastUse: 5, refs: [`${SKS}/voice/references/voice.md`] })
-  trackSkillCall(m, 'Read', { file_path: `${SKS}/voice/SKILL.md` }, 9)
+  track(m, 'Read', { file_path: `${SKS}/voice/SKILL.md` }, 9)
   expect(m.get('plug:voice')).toMatchObject({ lastUse: 9, refs: [`${SKS}/voice/references/voice.md`] })
   // Edit/Write/Grep/Glob paths count too; another skill's dir does not.
-  trackSkillCall(m, 'Edit', { file_path: `${SKS}/voice/scripts/run.py` }, 10)
-  trackSkillCall(m, 'Write', { file_path: `${SKS}/other/x.md` }, 11)
+  track(m, 'Edit', { file_path: `${SKS}/voice/scripts/run.py` }, 10)
+  track(m, 'Write', { file_path: `${SKS}/other/x.md` }, 11)
   expect(m.get('plug:voice')?.lastUse).toBe(10)
   expect(m.get('plug:voice')?.refs[0]).toBe(`${SKS}/voice/scripts/run.py`)
-  trackSkillCall(m, 'Grep', { pattern: 'x', path: `${SKS}/voice/references/g.md` }, 12)
+  track(m, 'Grep', { pattern: 'x', path: `${SKS}/voice/references/g.md` }, 12)
   expect(m.get('plug:voice')?.refs[0]).toBe(`${SKS}/voice/references/g.md`)
-  trackSkillCall(m, 'Glob', { pattern: `${SKS}/voice/references/*.md` }, 13)
+  track(m, 'Glob', { pattern: `${SKS}/voice/references/*.md` }, 13)
   expect(m.get('plug:voice')).toMatchObject({ lastUse: 13 })
   expect(m.get('plug:voice')?.refs.some(r => r.includes('*'))).toBe(false)
 })
 
 test('trackSkillCall: a skill that was never loaded is not tracked from a path alone', () => {
   const m = new Map<string, SkillUse>()
-  trackSkillCall(m, 'Read', { file_path: `${SKS}/voice/references/voice.md` }, 5)
+  track(m, 'Read', { file_path: `${SKS}/voice/references/voice.md` }, 5)
   expect(m.size).toBe(0)
 })
 
 test('trackSkillCall: path-like tokens in a Bash command are detected', () => {
   const m = new Map<string, SkillUse>()
-  trackSkillCall(m, 'Skill', { skill: 'voice' }, 1)
-  trackSkillCall(m, 'Bash', { command: `cat "${SKS}/voice/references/a.md" | head -5 && ls ${SKS}/voice/` }, 6)
+  track(m, 'Skill', { skill: 'voice' }, 1)
+  track(m, 'Bash', { command: `cat "${SKS}/voice/references/a.md" | head -5 && ls ${SKS}/voice/` }, 6)
   expect(m.get('voice')).toMatchObject({ lastUse: 6, refs: [`${SKS}/voice/references/a.md`] })
-  trackSkillCall(m, 'Bash', { command: 'echo /skills/voice-extra/x.md' }, 8)
+  track(m, 'Bash', { command: 'echo /skills/voice-extra/x.md' }, 8)
   expect(m.get('voice')?.lastUse).toBe(6)
 })
 
 test('trackSkillCall: refs keep at most 8, newest first, deduplicated', () => {
   const m = new Map<string, SkillUse>()
-  trackSkillCall(m, 'Skill', { skill: 'voice' }, 1)
-  for (let i = 1; i <= 10; i++) trackSkillCall(m, 'Read', { file_path: `${SKS}/voice/r${i}.md` }, 1 + i)
+  track(m, 'Skill', { skill: 'voice' }, 1)
+  for (let i = 1; i <= 10; i++) track(m, 'Read', { file_path: `${SKS}/voice/r${i}.md` }, 1 + i)
   const refs = m.get('voice')?.refs ?? []
   expect(refs.length).toBe(8)
   expect(refs[0]).toBe(`${SKS}/voice/r10.md`)
   expect(refs.at(-1)).toBe(`${SKS}/voice/r3.md`)
-  trackSkillCall(m, 'Read', { file_path: `${SKS}/voice/r5.md` }, 20)
+  track(m, 'Read', { file_path: `${SKS}/voice/r5.md` }, 20)
   expect(m.get('voice')?.refs.slice(0, 2)).toEqual([`${SKS}/voice/r5.md`, `${SKS}/voice/r10.md`])
   expect(m.get('voice')?.refs.length).toBe(8)
+})
+
+test('trackSkillCall: a path is normalized first; one that escapes or leaves the skill dir is not a ref', () => {
+  const m = new Map<string, SkillUse>()
+  track(m, 'Skill', { skill: 'foo' }, 1)
+  track(m, 'Read', { file_path: '/x/skills/foo/../../etc/passwd' }, 2)
+  track(m, 'Read', { file_path: '/../skills/foo/r.md' }, 3)
+  track(m, 'Bash', { command: 'cat /x/skills/foo/../../../etc/passwd' }, 4)
+  expect(m.get('foo')).toMatchObject({ lastUse: 1, refs: [] })
+  track(m, 'Read', { file_path: '/x//skills/./foo/references/../a.md' }, 5)
+  expect(m.get('foo')).toMatchObject({ lastUse: 5, refs: ['/x/skills/foo/a.md'] })
+  track(m, 'Read', { file_path: '/x/skills/foo/../../skills/foo/b.md' }, 6)
+  expect(m.get('foo')?.refs).toEqual(['/x/skills/foo/b.md', '/x/skills/foo/a.md'])
+})
+
+test('normalizePath: collapses ., .. and //, resolves ~ and relative paths, refuses escapes', () => {
+  expect(normalizePath('/a/./b//c/../d.md')).toBe('/a/b/d.md')
+  expect(normalizePath('/a/skills/foo/.')).toBe('/a/skills/foo/')
+  expect(normalizePath('/a/../..')).toBeUndefined()
+  expect(normalizePath('~/s/x.md', { home: '/home/u' })).toBe('/home/u/s/x.md')
+  expect(normalizePath('~/s/x.md')).toBeUndefined()
+  expect(normalizePath('s/x.md', { cwd: '/w/p' })).toBe('/w/p/s/x.md')
+  expect(normalizePath('../s/x.md', { cwd: '/w/p' })).toBe('/w/s/x.md')
+  expect(normalizePath('C:\\u\\s\\..\\x.md')).toBe('C:/u/x.md')
+})
+
+test('trackSkillCall: only a dir confirmed to hold SKILL.md counts; an unknown one is deferred, a refused one ignored', () => {
+  const m = new Map<string, SkillUse>()
+  track(m, 'Skill', { skill: 'review' }, 1)
+  const p = '/x/skills/review/'
+  expect(trackSkillCall(m, 'Read', { file_path: `${p}a.md` }, 2, () => false)).toEqual([])
+  expect(m.get('review')).toMatchObject({ lastUse: 1, refs: [] })
+  const d = trackSkillCall(m, 'Read', { file_path: `${p}a.md` }, 3, () => undefined)
+  expect(d.map(x => x.prefix)).toEqual([p])
+  expect(m.get('review')).toMatchObject({ lastUse: 1, refs: [] })
+  d[0].apply()
+  expect(m.get('review')).toMatchObject({ lastUse: 3, refs: [`${p}a.md`] })
+  expect(trackSkillCall(m, 'Read', { file_path: `${p}b.md` }, 4, () => true)).toEqual([])
+  expect(m.get('review')?.refs).toEqual([`${p}b.md`, `${p}a.md`])
+})
+
+test('trackSkillCall: two skills sharing a short name: the plugin segment decides, else the latest loaded', () => {
+  const m = new Map<string, SkillUse>()
+  track(m, 'Skill', { skill: 'a:foo' }, 1)
+  track(m, 'Skill', { skill: 'b:foo' }, 2)
+  track(m, 'Read', { file_path: '/cache/a/1.0/skills/foo/r1.md' }, 3)
+  track(m, 'Read', { file_path: '/cache/b/1.0/skills/foo/r2.md' }, 4)
+  expect(m.get('a:foo')?.refs).toEqual(['/cache/a/1.0/skills/foo/r1.md'])
+  expect(m.get('b:foo')?.refs).toEqual(['/cache/b/1.0/skills/foo/r2.md'])
+  track(m, 'Read', { file_path: '/home/u/skills/foo/r3.md' }, 5)
+  expect(m.get('b:foo')?.refs[0]).toBe('/home/u/skills/foo/r3.md')
+  expect(m.get('a:foo')?.refs).toEqual(['/cache/a/1.0/skills/foo/r1.md'])
+  track(m, 'Skill', { skill: 'a:foo' }, 6)
+  track(m, 'Read', { file_path: '/home/u/skills/foo/r4.md' }, 7)
+  expect(m.get('a:foo')?.refs[0]).toBe('/home/u/skills/foo/r4.md')
+})
+
+test('trackSkillCall: Bash tokens lose trailing punctuation and :line:col suffixes; relative and ~ paths resolve', () => {
+  const m = new Map<string, SkillUse>()
+  track(m, 'Skill', { skill: 'voice' }, 1)
+  track(m, 'Bash', { command: `see ${SKS}/voice/a.md:12:3, and ${SKS}/voice/b.md. also ${SKS}/voice/c.md:7` }, 2)
+  expect(m.get('voice')?.refs).toEqual([`${SKS}/voice/c.md`, `${SKS}/voice/b.md`, `${SKS}/voice/a.md`])
+  trackSkillCall(m, 'Read', { file_path: '~/.claude/skills/voice/h.md' }, 3, ALL_ROOTS, { home: '/home/u' })
+  trackSkillCall(m, 'Read', { file_path: 'skills/voice/rel.md' }, 4, ALL_ROOTS, { cwd: '/home/u/.claude' })
+  expect(m.get('voice')?.refs.slice(0, 2)).toEqual([`${SKS}/voice/rel.md`, `${SKS}/voice/h.md`])
+})
+
+test('instructions: the hot-skill line names at most 8 skills and counts the rest', () => {
+  const names = Array.from({ length: 11 }, (_, i) => `s${i}`)
+  const out = buildInstructions(HANDOFF, [], '/h.md', 'en', undefined, names)
+  expect(out).toContain('s7')
+  expect(out).not.toContain('s8')
+  expect(out).toContain('+3 more')
+  expect(buildInstructions(HANDOFF, [], '/h.md', 'en', undefined, names.slice(0, 8))).not.toContain('more')
+  expect(buildInstructions(HANDOFF, [], '/h.md', 'zh', undefined, names)).toContain(STRINGS.zh.skillMore(3))
 })
 
 test('tierSkills: used within hotWindow is hot, older is nothing', () => {
@@ -2494,6 +2584,7 @@ const readFile = ($: Dollar, file_path: string, extra: Record<string, unknown> =
 /** Loads the skill `voice` with two refs (one small, one big), then compacts. */
 async function skillSession($: Dollar, on: On, handoff: Record<string, unknown> = langHandoff(), cfg?: { reqs?: number }) {
   const w = engine(on)
+  w.files.set(`${SKS}/voice/SKILL.md`, '# voice')
   w.files.set(`${SKS}/voice/references/small.md`, 'SMALL_REF_BODY')
   w.files.set(`${SKS}/voice/references/big.md`, 'B'.repeat(9_000))
   await start($)
@@ -2623,6 +2714,7 @@ test('skills: a prior miss rate from profile.json makes an idle skill hot at the
 
 test('skills: an unreadable ref is listed, not inlined', async ($, on) => {
   const w = engine(on)
+  w.files.set(`${SKS}/voice/SKILL.md`, '# voice')
   await start($)
   await skillCall($, 'voice')
   await readFile($, `${SKS}/voice/references/gone.md`)
@@ -2648,6 +2740,7 @@ test('skills: refInlineK=0 lists every ref, skillBudgetK caps the total', { opti
 
 test('skills learning: an auto or manual compaction counts too, and every ref is a miss then', async ($, on) => {
   const w = engine(on)
+  w.files.set(`${SKS}/voice/SKILL.md`, '# voice')
   w.files.set(`${SKS}/voice/references/small.md`, 'SMALL_REF_BODY')
   await start($)
   await skillCall($, 'voice')
@@ -2656,4 +2749,121 @@ test('skills learning: an auto or manual compaction counts too, and every ref is
   expect(profileSkills(w)).toEqual({ voice: { compactions: 1, refMisses: 0 } })
   await readFile($, `${SKS}/voice/references/small.md`)
   expect(profileSkills(w)).toEqual({ voice: { compactions: 1, refMisses: 1 } })
+})
+
+// ---- skill working set: bounded reads, traversal, anchoring ----
+
+/** One loaded skill `voice` with the given ref files (path under the skill dir to text), compacted. */
+async function refSession($: Dollar, on: On, refs: Record<string, string>, setup?: (w: W) => void) {
+  const w = engine(on)
+  w.files.set(`${SKS}/voice/SKILL.md`, '# voice')
+  for (const [p, t] of Object.entries(refs)) w.files.set(`${SKS}/voice/${p}`, t)
+  setup?.(w)
+  await start($)
+  await skillCall($, 'voice')
+  for (const p of Object.keys(refs)) await readFile($, `${SKS}/voice/${p}`)
+  w.reads.length = 0
+  await turnStart($, 't1')
+  await call($, langHandoff())
+  await turnComplete($, 't1')
+  await w.clock.advance(1_500)
+  return w
+}
+
+test('skills: a ref bigger than refInlineK is listed from its stat size and never read', async ($, on) => {
+  const w = engine(on)
+  w.files.set(`${SKS}/voice/SKILL.md`, '# voice')
+  w.files.set(`${SKS}/voice/big.md`, 'B'.repeat(9_000))
+  w.files.set(`${SKS}/voice/small.md`, 'SMALL_REF_BODY')
+  await start($)
+  await skillCall($, 'voice')
+  await readFile($, `${SKS}/voice/big.md`)
+  await readFile($, `${SKS}/voice/small.md`)
+  w.reads.length = 0
+  await turnStart($, 't1')
+  await call($, langHandoff())
+  await turnComplete($, 't1')
+  await w.clock.advance(1_500)
+  expect(w.reads).toEqual([`${SKS}/voice/small.md`])
+  expect(w.submits[0].text).toContain(`${SKS}/voice/big.md`)
+  expect(w.submits[0].text).toContain('SMALL_REF_BODY')
+})
+
+test('skills: reads stop once the skill budget is spent; the rest are listed unread', async ($, on) => {
+  const refs = Object.fromEntries([1, 2, 3, 4].map(i => [`r${i}.md`, `R${i}`.padEnd(7_000, 'x')]))
+  const w = await refSession($, on, refs)
+  // Newest first: r4, r3, r2 fit 3 x 1.75k <= 6k; r1 would reach 7k.
+  expect(w.reads).toEqual([`${SKS}/voice/r4.md`, `${SKS}/voice/r3.md`, `${SKS}/voice/r2.md`])
+  expect(w.submits[0].text).toContain(`${SKS}/voice/r1.md`)
+  expect(w.submits[0].text).not.toContain('R1xx')
+})
+
+test('skills: a ref symlinked out of the skill dir is listed, not read', async ($, on) => {
+  const w = await refSession($, on, { 'ok.md': 'OK_BODY', 'evil.md': 'x' }, w => {
+    w.files.set('/etc/secret', 'SECRET_BODY')
+    w.links.set(`${SKS}/voice/evil.md`, '/etc/secret')
+  })
+  expect(w.reads).toEqual([`${SKS}/voice/ok.md`])
+  expect(w.submits[0].text).toContain(`${SKS}/voice/evil.md`)
+  expect(w.submits[0].text).not.toContain('SECRET_BODY')
+})
+
+test('skills: a symlinked skill dir still inlines its refs', async ($, on) => {
+  const w = await refSession($, on, { 'ok.md': 'OK_BODY' }, w => {
+    w.files.set('/repo/skills/voice/ok.md', 'OK_BODY')
+    w.files.set('/repo/skills/voice/SKILL.md', '# voice')
+    w.links.set(`${SKS}/voice`, '/repo/skills/voice')
+    w.links.set(`${SKS}/voice/ok.md`, '/repo/skills/voice/ok.md')
+  })
+  expect(w.submits[0].text).toContain('OK_BODY')
+})
+
+test('skills: a path that climbs out of the skill dir is neither tracked nor read', async ($, on) => {
+  const w = engine(on)
+  w.files.set(`${SKS}/voice/SKILL.md`, '# voice')
+  w.files.set('/etc/passwd', 'ROOT_BODY')
+  await start($)
+  await skillCall($, 'voice')
+  await readFile($, `${SKS}/voice/../../../../etc/passwd`)
+  await $.tool.call({ tool: 'Bash', command: `cat ${SKS}/voice/../../../../etc/passwd` } as never)
+  w.reads.length = 0
+  await turnStart($, 't1')
+  await call($, langHandoff())
+  await turnComplete($, 't1')
+  await w.clock.advance(1_500)
+  expect(w.reads).not.toContain('/etc/passwd')
+  expect(w.submits[0].text).not.toContain('passwd')
+  expect(w.submits[0].text).not.toContain('ROOT_BODY')
+})
+
+test('skills: a skills/<short>/ dir without SKILL.md is not the skill', async ($, on) => {
+  const w = engine(on)
+  w.files.set(`${SKS}/voice/SKILL.md`, '# voice')
+  w.files.set('/other/skills/voice/notes.md', 'NOTES_BODY')
+  await start($)
+  await skillCall($, 'voice')
+  await readFile($, '/other/skills/voice/notes.md')
+  await readFile($, `${SKS}/voice/real.md`)
+  await turnStart($, 't1')
+  await call($, langHandoff())
+  await turnComplete($, 't1')
+  await w.clock.advance(1_500)
+  expect(w.submits[0].text).not.toContain('/other/skills/voice/notes.md')
+  expect(w.submits[0].text).not.toContain('NOTES_BODY')
+})
+
+test('skills: a Read written with ~ or ./ still counts against the tracked ref after a compaction', async ($, on) => {
+  const w = await refSession($, on, { 'big.md': 'B'.repeat(9_000) })
+  await readFile($, '~/.claude/skills/voice/big.md')
+  expect(w.log().filter(l => l.result === 'skill-ref-miss').length).toBe(1)
+})
+
+test('skills: a ref linked into another skills/<short>/ dir is listed, not read', async ($, on) => {
+  const w = await refSession($, on, { 'evil.md': 'x' }, w => {
+    w.files.set('/other/skills/voice/x.md', 'OTHER_BODY')
+    w.links.set(`${SKS}/voice/evil.md`, '/other/skills/voice/x.md')
+  })
+  expect(w.reads).toEqual([])
+  expect(w.submits[0].text).not.toContain('OTHER_BODY')
+  expect(w.submits[0].text).toContain(`${SKS}/voice/evil.md`)
 })
