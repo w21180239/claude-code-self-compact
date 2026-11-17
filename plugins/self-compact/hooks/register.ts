@@ -89,7 +89,8 @@ type Strings = {
   contPending: string
   contClosing: string
   contRecall: (sessionId: string) => string
-  description: (cfg: Config) => string
+  description: (cfg: Config, t?: Thresholds) => string
+  heavyHarness: (pK: string) => string
   node: string
   objective: string
   standing_orders: string
@@ -128,6 +129,8 @@ export const STRINGS: Record<Lang, Strings> = {
     toastDone: (before, after) => `compacted ${before}% → ${after}%`,
     nudgeSoft: pct => `[self-compact] Context ${pct}%, watch for the next node and call compact_now.`,
     nudgeUrgent: pct => `[self-compact] Context ${pct}%, call compact_now at the next safe step, no need to wait for a perfect node.`,
+    heavyHarness: pK =>
+      `[self-compact] Context after compaction is still ${pK} (plugins, skills, memory), so a compaction saves little: compact at big phase handoffs or near the urgent tier, not at every small node.`,
     nodeNames: {
       push: 'git push',
       pr: 'PR/MR create, review or merge',
@@ -191,9 +194,9 @@ export const STRINGS: Record<Lang, Strings> = {
     contClosing: 'Continue with the next step; reread the handoff for details.',
     contRecall: sid =>
       `The summary drops detail. When you need an exact error string, value, path or command from before compaction, grep the transcript ~/.claude/projects/*/${sid}.jsonl instead of guessing or redoing the work.`,
-    description: cfg => `Compact your own context at a task node. The call queues: the plugin compacts after the turn ends, then resumes you at \`next\`.
+    description: (cfg, t) => `Compact your own context at a task node. The call queues: the plugin compacts after the turn ends, then resumes you at \`next\`.
 
-Tiers (enforced): <${tierPcts(cfg).floor}% denied; ${tierPcts(cfg).floor}-${tierPcts(cfg).floor + NODE_MARGIN_PCT}% only at a big phase handoff; >=${tierPcts(cfg).floor + NODE_MARGIN_PCT}% any clean node. Nudged at >=${tierPcts(cfg).node}%, urgent at >=${tierPcts(cfg).urgent}%.
+Tiers (enforced; compaction leaves ~${k(tiers(cfg, t).p)}): <${tierText(cfg, tiers(cfg, t), "floor")} denied; ${tierText(cfg, tiers(cfg, t), "floor")}-${tierText(cfg, tiers(cfg, t), "node")} only at a big phase handoff; >=${tierText(cfg, tiers(cfg, t), "node")} any clean node, nudged; >=${tierText(cfg, tiers(cfg, t), "urgent")} compact at the next safe step, no perfect node needed.
 
 Good nodes: a verified block end (push, merge, PR, tests green, sent, todos done), topic change, phase handoff, subagent returned, delegation waiting, work saved for review. Anti-nodes: open question, unsent draft, new user rule not yet in standing_orders, mid retry/debug loop, unread agent result.
 
@@ -235,6 +238,8 @@ After "Queued", end the turn now: one line, call no more tools.
     toastDone: (before, after) => `压缩 ${before}% → ${after}%`,
     nudgeSoft: pct => `[self-compact] 上下文 ${pct}%，留意下一个节点调用 compact_now。`,
     nudgeUrgent: pct => `[self-compact] 上下文 ${pct}%，在下一个安全步骤调用 compact_now，不必等完美节点。`,
+    heavyHarness: pK =>
+      `[self-compact] 压缩后上下文仍有 ${pK}（插件、技能、记忆占用大），压一次省得不多：只在大阶段交接或接近紧急档时压，别每个小节点都压。`,
     nodeNames: {
       push: 'git push',
       pr: 'PR/MR 创建、评审或合并',
@@ -297,9 +302,9 @@ After "Queued", end the turn now: one line, call no more tools.
     contClosing: '先按下一步继续；需要细节回读交接单。',
     contRecall: sid =>
       `摘要会丢细节。需要压缩前的报错原文、数值、路径或命令时，grep transcript ~/.claude/projects/*/${sid}.jsonl，不要猜，也不要重做。`,
-    description: cfg => `在任务节点上压缩你自己的上下文。调用只排队：本轮结束后插件自动压缩，并发续接消息让你按 next 继续。
+    description: (cfg, t) => `在任务节点上压缩你自己的上下文。调用只排队：本轮结束后插件自动压缩，并发续接消息让你按 next 继续。
 
-门槛（插件强制，不够会被拒）：<${tierPcts(cfg).floor}% 拒绝；${tierPcts(cfg).floor}-${tierPcts(cfg).floor + NODE_MARGIN_PCT}% 只在大阶段交接压（spec→plan、plan→实现、MR 创建→review）且下一阶段明显够长；>=${tierPcts(cfg).floor + NODE_MARGIN_PCT}% 任何干净节点可压。>=${tierPcts(cfg).node}% 未压插件会提醒；>=${tierPcts(cfg).urgent}% 在下一个安全步骤就压，不必等完美节点。
+门槛（插件强制，压缩后约 ${k(tiers(cfg, t).p)}，不够会被拒）：<${tierText(cfg, tiers(cfg, t), "floor")} 拒绝；${tierText(cfg, tiers(cfg, t), "floor")}-${tierText(cfg, tiers(cfg, t), "node")} 只在大阶段交接压（spec→plan、plan→实现、MR 创建→review）且下一阶段明显够长；>=${tierText(cfg, tiers(cfg, t), "node")} 任何干净节点可压，插件从此提醒；>=${tierText(cfg, tiers(cfg, t), "urgent")} 在下一个安全步骤就压，不必等完美节点。
 
 好节点：一块工作收尾并已验证（push、合并、PR、测试通过、消息已发、待办全完成），转新需求；状态刚落盘；用户换话题；阶段交接；子代理返回；任务委派出去进入等待（pending 写明每个任务及回报方式）；成果落盘待用户审阅；用户说"等会 compact/继续/下一个"。
 
@@ -375,31 +380,34 @@ export function thresholds(p: number, window: number, cfg: Config): Thresholds {
   }
 }
 
-// Interim until the learned post-compact size is wired in.
-const interimThresholds = (window: number, cfg: Config): Thresholds => thresholds(DEFAULT_BASELINE + 25_000, window, cfg)
+/** Tiers for the current post-compact size p: this session's sample, else the learned profile, else baseline + 25k. */
+export function currentThresholds(window: number): Thresholds {
+  return thresholds(pickP(state.profile, state.cwd ?? '', state.sessionP, state.baseline), window, state.cfg)
+}
 
-// Window assumed where none is at hand (tool description, nudgeLevel default).
+// Window assumed where the engine has not reported one (the tool description at session start).
 const REF_WINDOW = 1_000_000
-const tierPcts = (cfg: Config, window = REF_WINDOW) => {
-  const t = interimThresholds(window, cfg)
-  const pc = (v: number) => Math.round((v / window) * 100)
-  return { floor: pc(t.floor), node: pc(t.node), urgent: pc(t.urgent) }
+const tiers = (cfg: Config, t?: Thresholds): Thresholds => t ?? thresholds(pickP(state.profile, state.cwd ?? '', state.sessionP, state.baseline), REF_WINDOW, cfg)
+
+/** "213k (21%)", full-width brackets in Chinese. */
+const tierText = (cfg: Config, t: Thresholds, tier: 'floor' | 'node' | 'urgent'): string => {
+  const pc = Math.round((t[tier] / t.window) * 100)
+  return cfg.language === 'zh' ? `${k(t[tier])}（${pc}%）` : `${k(t[tier])} (${pc}%)`
 }
 
 export type GateResult = { ok: true; pct: number } | { ok: false; reason: string; pct?: number }
 
-export function gate(u: Usage, baseline: number | undefined, cfg: Config): GateResult {
+export function gate(u: Usage, t: Thresholds, lang: Lang): GateResult {
   const pct = pctOf(u)
   if (pct === undefined || u.tokens === undefined || !u.window) {
-    return { ok: false, reason: STRINGS[cfg.language].gateNoUsage }
+    return { ok: false, reason: STRINGS[lang].gateNoUsage }
   }
-  const need = interimThresholds(u.window, cfg).floor
-  if (u.tokens < need) {
-    const needPct = Math.round((need / u.window) * 1000) / 10
+  if (u.tokens < t.floor) {
+    const needPct = Math.round((t.floor / u.window) * 1000) / 10
     return {
       ok: false,
       pct,
-      reason: STRINGS[cfg.language].gateBelow(pct, k(u.tokens), needPct, k(need)),
+      reason: STRINGS[lang].gateBelow(pct, k(u.tokens), needPct, k(t.floor)),
     }
   }
   return { ok: true, pct }
@@ -407,16 +415,13 @@ export function gate(u: Usage, baseline: number | undefined, cfg: Config): GateR
 
 export type NudgeLevel = 'none' | 'soft' | 'urgent'
 
-/** Nudge from the node tier, again only after each further step; urgent from the urgent tier. */
-export function nudgeLevel(pct: number, lastNudgedPct: number | undefined, floorPct: number, cfg: Config, window = REF_WINDOW): NudgeLevel {
-  const t = interimThresholds(window, cfg)
-  const start = Math.max((t.node / window) * 100, floorPct)
-  const urgentPct = (t.urgent / window) * 100
-  if (pct < start) return 'none'
-  const isUrgent = pct >= urgentPct
-  if (lastNudgedPct !== undefined && pct < lastNudgedPct + cfg.nudgeStepPct) {
+/** Nudge from the node tier (never below the floor), again only after each further `stepTokens`; urgent from the urgent tier. */
+export function nudgeLevel(tokens: number, lastNudgedTokens: number | undefined, t: Thresholds, stepTokens: number): NudgeLevel {
+  if (tokens < Math.max(t.node, t.floor)) return 'none'
+  const isUrgent = tokens >= t.urgent
+  if (lastNudgedTokens !== undefined && tokens < lastNudgedTokens + stepTokens) {
     // Crossing into urgent territory escalates at once.
-    if (!(isUrgent && lastNudgedPct < urgentPct)) return 'none'
+    if (!(isUrgent && lastNudgedTokens < t.urgent)) return 'none'
   }
   return isUrgent ? 'urgent' : 'soft'
 }
@@ -425,6 +430,10 @@ const num = (v: unknown, d: number): number => {
   const n = Number(v)
   return v === undefined || v === '' || !Number.isFinite(n) ? d : n
 }
+
+// Lower bounds that keep the tier arithmetic sane.
+const MIN_URGENT_K = 50
+const MIN_COST_K = 1
 
 const calls = (v: unknown, d: number): number => Math.max(2, num(v, d))
 
@@ -441,8 +450,8 @@ export function configFrom(options: Record<string, unknown> | undefined): Config
     nodeCalls: calls(o.nodeCalls, DEFAULTS.nodeCalls),
     workCalls: calls(o.workCalls, DEFAULTS.workCalls),
     nudgeStepPct: num(o.nudgeStepPct, DEFAULTS.nudgeStepPct),
-    urgentK: num(o.urgentK, DEFAULTS.urgentK),
-    compactCostK: num(o.compactCostK, DEFAULTS.compactCostK),
+    urgentK: Math.max(MIN_URGENT_K, num(o.urgentK, DEFAULTS.urgentK)),
+    compactCostK: Math.max(MIN_COST_K, num(o.compactCostK, DEFAULTS.compactCostK)),
     enabled: en === undefined ? true : !(en === false || en === 'false' || en === '0'),
     releaseStopHooks: rs === true || rs === 'true' || rs === '1',
     autoNodes: flag(o.autoNodes),
@@ -720,6 +729,14 @@ type State = {
   interactive: boolean
   pending?: Pending
   baseline?: number
+  cwd?: string
+  profile: Profile
+  // This session's first post-compact size, and whether the next main step is to be sampled for it.
+  sessionP?: number
+  awaitingPSample: boolean
+  heavyNoted: boolean
+  // P the registered tool description was rendered for.
+  describedP?: number
   // Context tokens of the last main-loop request, for when the engine cannot measure.
   lastStepTokens?: number
   seq: number
@@ -736,7 +753,7 @@ type State = {
   notes: string[]
   // Latest nudge line waiting for a carrier; replaced by a newer one, dropped if a request is queued.
   nudge?: string
-  lastNudgedPct?: number
+  lastNudgedTokens?: number
   // Stop-hook release: a Stop we forced to end the turn, and whether that end failed to compact.
   forcing: boolean
   lastEndForced: boolean
@@ -758,6 +775,9 @@ type State = {
 // One state per loaded module; a session start begins afresh.
 export const state: State = {
   cfg: { ...DEFAULTS },
+  profile: { byProject: {} },
+  awaitingPSample: false,
+  heavyNoted: false,
   interactive: false,
   seq: 0,
   busy: false,
@@ -812,6 +832,8 @@ type LogLine = {
   afterPct?: number
   durationMs?: number
   kind?: string
+  pSample?: number
+  p?: number
 }
 
 // $.fs has no append: each write is read-modify-write, so writers queue behind one another.
@@ -883,13 +905,32 @@ export function pickP(profile: Profile, cwd: string, sessionSample: number | und
   return (baseline ?? DEFAULT_BASELINE) + 25_000
 }
 
+const validEst = (e: unknown): e is PEst =>
+  typeof e === 'object' && e !== null && Number.isFinite((e as PEst).p) && (e as PEst).p > 0 && Number.isFinite((e as PEst).n)
+
 export function parseProfile(text: string | undefined): Profile {
   try {
     const o = JSON.parse(text ?? '') as unknown
     if (typeof o !== 'object' || o === null || Array.isArray(o)) return { byProject: {} }
     const r = o as Partial<Profile>
-    const byProject = typeof r.byProject === 'object' && r.byProject !== null && !Array.isArray(r.byProject) ? r.byProject : {}
-    return { ...r, byProject }
+    const raw = typeof r.byProject === 'object' && r.byProject !== null && !Array.isArray(r.byProject) ? r.byProject : {}
+    const byProject: Record<string, PEst> = {}
+    for (const [key, est] of Object.entries(raw)) if (validEst(est)) byProject[key] = est
+    const { global: g, ...rest } = r
+    return validEst(g) ? { ...rest, global: g, byProject } : { ...rest, byProject }
+  } catch {
+    return { byProject: {} }
+  }
+}
+
+/** The saved profile; an absent or unreadable file reads as empty. */
+async function loadProfile($: Dollar): Promise<Profile> {
+  try {
+    const home = await dataRoot($)
+    if (home === undefined) return { byProject: {} }
+    const path = `${home}/profile.json`
+    const text = (await $.fs.exists(path)) ? await $.fs.read(path) : undefined
+    return parseProfile(typeof text === 'string' ? text : undefined)
   } catch {
     return { byProject: {} }
   }
@@ -947,8 +988,8 @@ async function handleCompact($: Dollar, input: Record<string, unknown>, isSub: b
   if (state.lastTool === 'AskUserQuestion') {
     return deny(S().denyAskedUser, 'asked-user', node)
   }
-  const usage = contextOf((await $.session.usage()).context)
-  const g = gate(usage, state.baseline, state.cfg)
+  const usage = await usageOf($)
+  const g = gate(usage, currentThresholds(usage.window ?? REF_WINDOW), state.cfg.language)
   if (!g.ok) return deny(g.reason, 'gate', node, g.pct)
 
   const root = await dataRoot($)
@@ -1051,10 +1092,10 @@ async function runCompact($: Dollar): Promise<void> {
   state.compacting = true
   try {
     const started = await $.clock.now()
-    const ctx = contextOf((await $.session.usage()).context)
+    const ctx = await usageOf($)
     const before = pctOf(ctx)
     // Auto-compact got there first: the request is moot, but work still resumes.
-    if (ctx.tokens !== undefined && !gate(ctx, state.baseline, state.cfg).ok) {
+    if (ctx.tokens !== undefined && !gate(ctx, currentThresholds(ctx.window ?? REF_WINDOW), state.cfg.language).ok) {
       await dropPending($, p, { result: 'preempted', beforePct: p.requestedPct, afterPct: before })
       state.compacting = false
       sendContinuation($, p, p.requestedPct, before)
@@ -1093,7 +1134,8 @@ async function runCompact($: Dollar): Promise<void> {
         : pctOf((await $.session.usage()).context)
     const durationMs = (await $.clock.now()) - started
     await dropPending($, p, { result: 'done', beforePct: before, afterPct: after, durationMs })
-    state.lastNudgedPct = undefined
+    state.lastNudgedTokens = undefined
+    state.awaitingPSample = true
     // The old step total is stale; the result's count stands in until the next step.
     state.lastStepTokens = tokensAfter
     state.checkedAt.clear()
@@ -1113,26 +1155,65 @@ type StepUsage = { input_tokens: number; cache_read_input_tokens: number; cache_
 // The first request of a fresh session carries little more than the opening prompt; a resumed transcript is far longer and would inflate the baseline.
 export const BASELINE_MAX_MESSAGES = 3
 
+/** Context reading against the window the engine compacts at ($.session.usage breakdown.maxTokens, else context.window). */
+async function usageOf($: Dollar): Promise<Usage> {
+  const { context } = await $.session.usage({ breakdown: 'summary' })
+  const max = context.breakdown?.maxTokens
+  return contextOf({ tokens: context.tokens, window: typeof max === 'number' && max > 0 ? max : context.window })
+}
+
+/** (Re)registers compact_now; the description carries tiers in tokens, so it follows P. */
+async function registerTool($: Dollar): Promise<void> {
+  const window = (await usageOf($)).window ?? REF_WINDOW
+  const t = currentThresholds(window)
+  state.describedP = t.p
+  await $.tool.register({
+    name: TOOL,
+    description: S().description(state.cfg, t),
+    inputSchema: inputSchema(S()),
+    isDeferred: false,
+  })
+}
+
+/** Folds the first main step after a compaction into the profile and the session's P. */
+async function learnSample($: Dollar, total: number): Promise<void> {
+  state.awaitingPSample = false
+  state.sessionP = total
+  const cwd = state.cwd
+  const fold = (p: Profile) => {
+    p.global = learnP(p.global, total)
+    if (cwd !== undefined) p.byProject[cwd] = learnP(p.byProject[cwd], total)
+  }
+  fold(state.profile)
+  await saveProfile($, fold)
+  await logLine($, { result: 'p-sample', pSample: total, p: pickP(state.profile, cwd ?? '', state.sessionP, state.baseline) })
+  if (currentThresholds(REF_WINDOW).p !== state.describedP) await registerTool($)
+}
+
 async function onMainStep($: Dollar, u: StepUsage, messageCount: number): Promise<void> {
   const total = u.input_tokens + u.cache_read_input_tokens + u.cache_creation_input_tokens
-  // All-zero usage (a failed or empty response) measures nothing; keep the last reading.
-  if (total === 0) return
+  // Zero or garbage usage (a failed or empty response) measures nothing; keep the last reading.
+  if (!Number.isFinite(total) || total <= 0) return
   state.lastStepTokens = total
   if (state.baseline === undefined && messageCount <= BASELINE_MAX_MESSAGES) state.baseline = total
+  if (state.awaitingPSample) await learnSample($, total)
   if (!state.interactive || !state.cfg.enabled || (await $.env.get('DISABLE_COMPACT')) === '1') return
   if (state.pending !== undefined || state.compacting) return
-  const window = (await $.session.usage()).context.window
-  const pct = pctOf({ tokens: total, window })
-  if (pct === undefined || !window) return
-  const t = interimThresholds(window, state.cfg)
-  const floorPct = (t.floor / window) * 100
-  const level = nudgeLevel(pct, state.lastNudgedPct, floorPct, state.cfg, window)
+  const window = (await usageOf($)).window
+  if (!window) return
+  const t = currentThresholds(window)
+  if (t.heavy && !state.heavyNoted) {
+    state.heavyNoted = true
+    state.notes.push(S().heavyHarness(k(t.p)))
+  }
+  const level = nudgeLevel(total, state.lastNudgedTokens, t, (state.cfg.nudgeStepPct / 100) * window)
   if (level === 'none') {
     // Back under the start line: something compacted, so count afresh.
-    if (pct < Math.max((t.node / window) * 100, floorPct)) state.lastNudgedPct = undefined
+    if (total < Math.max(t.node, t.floor)) state.lastNudgedTokens = undefined
     return
   }
-  state.lastNudgedPct = pct
+  state.lastNudgedTokens = total
+  const pct = pctOf({ tokens: total, window }) ?? 0
   state.nudge = level === 'urgent' ? S().nudgeUrgent(pct) : S().nudgeSoft(pct)
 }
 
@@ -1160,7 +1241,11 @@ function resetConversation(): void {
   state.timer = undefined
   state.notes = []
   state.nudge = undefined
-  state.lastNudgedPct = undefined
+  state.lastNudgedTokens = undefined
+  state.sessionP = undefined
+  state.awaitingPSample = false
+  state.heavyNoted = false
+  state.describedP = undefined
   state.forcing = false
   state.lastEndForced = false
   state.forceFailed = false
@@ -1181,21 +1266,20 @@ function resetConversation(): void {
 
 // ---- autonomous triggers: node nudge, turn-end self-check, topic switch ----
 
-// A weak node signal and a topic-switch hint need this much room above the floor.
-export const NODE_MARGIN_PCT = 5
 // One self-check per node kind per this much context growth.
 export const CHECK_STEP_PCT = 5
 
 /** Context state for the autonomous triggers; undefined while they must stay quiet. */
-async function triggerGate($: Dollar): Promise<{ pct: number; floorPct: number; nodePct: number } | undefined> {
+async function triggerGate($: Dollar): Promise<{ pct: number; tokens: number; t: Thresholds } | undefined> {
   if (!state.cfg.autoNodes || !state.cfg.enabled || !state.interactive) return undefined
   if (state.pending !== undefined || state.compacting) return undefined
   if ((await $.env.get('DISABLE_COMPACT')) === '1') return undefined
-  const u = contextOf((await $.session.usage()).context)
-  const g = gate(u, state.baseline, state.cfg)
-  if (!g.ok || !u.window) return undefined
-  const t = interimThresholds(u.window, state.cfg)
-  return { pct: g.pct, floorPct: (t.floor / u.window) * 100, nodePct: (t.node / u.window) * 100 }
+  const u = await usageOf($)
+  if (u.tokens === undefined || !u.window) return undefined
+  const t = currentThresholds(u.window)
+  const g = gate(u, t, state.cfg.language)
+  if (!g.ok) return undefined
+  return { pct: g.pct, tokens: u.tokens, t }
 }
 
 /** After a main-session tool returns: record the node signal and, at most once per turn, build the nudge line. */
@@ -1207,7 +1291,7 @@ async function onNodeSignal($: Dollar, e: Record<string, unknown>, r: unknown): 
   if (state.nodeNudged) return undefined
   const g = await triggerGate($)
   if (g === undefined) return undefined
-  if (sig.strength === 'weak' && g.pct < g.floorPct + NODE_MARGIN_PCT) return undefined
+  if (sig.strength === 'weak' && g.tokens < g.t.node) return undefined
   state.nodeNudged = true
   await logLine($, { result: 'node-nudge', kind: sig.kind, pct: g.pct })
   return S().nodeNudge(sig.kind, g.pct)
@@ -1223,17 +1307,16 @@ async function scheduleSelfCheck($: Dollar): Promise<void> {
   const g = await triggerGate($)
   if (g === undefined) return
   const sig = state.turnSignal
-  const weakOk = g.pct >= g.floorPct + NODE_MARGIN_PCT
-  const workStart = Math.max(g.floorPct, g.nodePct - NODE_MARGIN_PCT)
+  const weakOk = g.tokens >= g.t.node
   let key: string
   let text: string
   if (sig !== undefined && (sig.strength === 'strong' || weakOk)) {
     key = sig.kind
     text = S().selfCheck(sig.kind, g.pct)
-  } else if (state.turnToolCalls >= WORK_TURN_MIN_CALLS && g.pct >= workStart) {
+  } else if (state.turnToolCalls >= WORK_TURN_MIN_CALLS && g.tokens >= g.t.work) {
     key = 'work'
     text = S().selfCheckWork(g.pct)
-  } else if (g.pct >= g.nodePct) {
+  } else if (g.tokens >= g.t.node) {
     key = 'pct'
     text = S().selfCheckLong(g.pct)
   } else return
@@ -1253,7 +1336,7 @@ async function fireSelfCheck($: Dollar, key: string, text: string): Promise<void
   // The context may have shrunk (auto-compact) while the debounce ran.
   if ((await triggerGate($)) === undefined) return
   state.awaitingCheck = true
-  const pct = pctOf(contextOf((await $.session.usage()).context))
+  const pct = pctOf(await usageOf($))
   await logLine($, { result: 'self-check', kind: key === 'pct' ? undefined : key, pct })
   // Not awaited: submit resolves only once the next turn starts.
   void Promise.resolve($.prompt.submit({ text })).catch(() => {})
@@ -1271,12 +1354,11 @@ export const register: Register = (on, options) => {
   on('session.start', async ($, e, next) => {
     state.interactive = e.isInteractive
     resetConversation()
-    await $.tool.register({
-      name: TOOL,
-      description: S().description(state.cfg),
-      inputSchema: inputSchema(S()),
-      isDeferred: false,
-    })
+    state.cwd = e.cwd
+    state.profile = await loadProfile($)
+    const stale = deprecatedKeys(options as Record<string, unknown> | undefined)
+    if (stale.length > 0) await logLine($, { result: 'deprecated', reason: stale.join(',') })
+    await registerTool($)
     return next(e)
   })
 
@@ -1393,6 +1475,7 @@ export const register: Register = (on, options) => {
     if (e.agentId === undefined && typeof r.skip !== 'string') {
       const after = (r as { tokensAfter?: unknown }).tokensAfter
       state.lastStepTokens = typeof after === 'number' && after > 0 ? after : undefined
+      state.awaitingPSample = true
     }
     return r
   })
