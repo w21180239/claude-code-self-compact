@@ -132,7 +132,7 @@ The plugin renders the handoff as markdown, adds the session's original request 
 
 The original request is the first real user message, capped at 1,500 characters and saved to `<session-id>/intent.md` on the first `compact_now`. Later calls read the saved copy, because after a compaction the transcript the engine returns starts with the summary, and each generation of summary would paraphrase the intent a little further. It is left out when it is still one of the last five messages.
 
-Instructions are capped at 8,000 characters. Trimming order: `done`, then the oldest user messages, then `drop`, `lessons`, the original request, `decisions` and `artifacts` (from the end). `standing_orders`, `pending`, `next` and the language rules are never trimmed.
+Instructions are capped at 8,000 characters. Trimming order: `done`, then the oldest user messages, then `drop`, `lessons`, the original request, `decisions` and `artifacts` (from the end). `standing_orders`, `pending`, `next`, the language rules and the hot-skill line are never trimmed.
 
 ## Language rules
 
@@ -143,6 +143,18 @@ A user who chats in one language and wants code, commits, PRs, specs and outgoin
 Four carriers keep the rules alive: the handoff file (first section, "Language rules"); the compact instructions (a line telling the summarizer to write in the chat language with that section first and each output rule copied verbatim, never trimmed by the 8,000-character cap); the first line of the continuation prompt; and, for the first 3 real user prompts after a compaction (composer or bridge origin, not commands, not plugin prompts), one short rule line in the prompt's context.
 
 Drift check: after a compaction the first non-empty main assistant answer (`turn.complete.answer`, the final visible text of the turn) is classified with the same CJK rule; when it differs from the chat language's class (the first of Chinese or English named in the chat rule) one `lang-drift` row with `expected` and `got` is logged, once per compaction. A tool-only turn has an empty answer and is skipped until text appears.
+
+## Skill working set
+
+After a compaction the engine re-injects the full body of every invoked skill itself (an `invoked_skills` attachment, no truncation seen). Mods cannot see or change it: a managed login skips user mods' `prompt.attachment` and `skill.prompt` hooks. The plugin therefore does not rewrite that re-injection and uses only `tool.call`. What a compaction loses is a skill's working set: the reference files read under the skill dir and where in the procedure the work stood. Re-reads after a compaction concentrate on those refs.
+
+**Tracking.** Session state per skill name (the name as given to `Skill`; the short name, the part after the last colon, matches paths). A main-session `Skill` call records the name and the current main request index (`state.reqs`, incremented on each main `turn.step`). A main-session Read, Grep, Glob, Edit or Write path, or a path-like token in a Bash command, containing `/skills/<short>/` sets `lastUse`; unless it is the dir's `SKILL.md` or a directory, it moves to the front of `refs` (at most 8, deduplicated). Calls with an `agentId` are ignored. State survives compactions and is cleared by `resetConversation`.
+
+**Tiering** (`tierSkills`). `keep_skills` makes a skill hot. Otherwise `drop_skills` makes it done: the model saying a skill is finished outranks a recent last use. Otherwise it is hot when `nowReq - lastUse <= hotWindow`, or when its prior `refMisses / compactions >= 0.3` with `compactions >= 3`. Everything else gets nothing. `keep_skills` and `drop_skills` are optional string arrays (names or short names); a malformed value counts as absent.
+
+**Carriers.** The compact instructions get one never-trimmed line naming the hot skills and asking the summarizer to record, per skill, the step reached and what remains. The resume message gets the "Skill working set" section after the language line and `next` (`renderSkillSection`): per hot skill `<name>: still in use` and its refs, each inlined through `$.fs` when its size is at most `refInlineK` thousand tokens (4 characters per token) and the running total stays within `skillBudgetK`, otherwise listed by path (a failed read also lists); per done skill one finished line. No hot or done skill omits the section.
+
+**Learning.** Each compaction (ours or auto/manual) adds one to `compactions` for every loaded skill in `profile.json` (`skills: { <name>: { compactions, refMisses } }`, written like P). Within 30 main requests after it, a main Read of a ref that was not inlined adds one to `refMisses` (once per ref) and logs `skill-ref-miss`; a Read of an inlined ref logs `skill-ref-reread`. `done` and `preempted` rows carry `skills: { hot, done, inlinedK, listed }`.
 
 ## Races
 
@@ -190,11 +202,11 @@ Every successful compaction ends with the continuation prompt, whether it was re
 
 ## Data
 
-`~/.claude/self-compact/<session-id>/handoff-<n>.md`, `~/.claude/self-compact/<session-id>/intent.md`, `~/.claude/self-compact/profile.json` and `~/.claude/self-compact/log.jsonl`. `profile.json` holds the learned post-compact size P per project (keyed by absolute cwd path) and globally. `log.jsonl` rows may carry `pSample` and `p`, and `result` also takes `p-sample`, `deprecated` and `tool-describe`. Mods cannot import `node:fs`, so files go through the engine's `$.fs`. Nothing leaves the machine and the plugin makes no network calls.
+`~/.claude/self-compact/<session-id>/handoff-<n>.md`, `~/.claude/self-compact/<session-id>/intent.md`, `~/.claude/self-compact/profile.json` and `~/.claude/self-compact/log.jsonl`. `profile.json` holds the learned post-compact size P per project (keyed by absolute cwd path) and globally. It also holds `skills`, per skill name the compactions it was loaded through and its ref misses. `log.jsonl` rows may carry `pSample` and `p`, and `result` also takes `p-sample`, `deprecated` and `tool-describe`. Mods cannot import `node:fs`, so files go through the engine's `$.fs`. Nothing leaves the machine and the plugin makes no network calls.
 
 Past about 2 MB, `log.jsonl` is moved to `log.1.jsonl` and a new file starts. A log that cannot be read is left untouched rather than overwritten.
 
-`log.jsonl` has one JSON line per request: `ts`, `session`, `node`, `pct` (usage at request), `result` (`queued`, `denied:<why>`, `done`, `preempted`, `aborted`, `stale`, `failed`, `error`, `p-sample`, `deprecated`, `tool-describe`, `self-check`, `self-check:compacted`, `self-check:declined`, `lang-drift`), an optional `reason` (on `self-check:declined`, the model's skip reason, at most 200 characters), optional `pSample` and `p`, `langSource` (`queued`, `done`), `expected` and `got` (`lang-drift`), `beforePct`, `afterPct` and `durationMs`.
+`log.jsonl` has one JSON line per request: `ts`, `session`, `node`, `pct` (usage at request), `result` (`queued`, `denied:<why>`, `done`, `preempted`, `aborted`, `stale`, `failed`, `error`, `p-sample`, `deprecated`, `tool-describe`, `self-check`, `self-check:compacted`, `self-check:declined`, `lang-drift`, `skill-ref-miss`, `skill-ref-reread`), an optional `reason` (on `self-check:declined`, the model's skip reason, at most 200 characters), optional `pSample` and `p`, `langSource` (`queued`, `done`), `expected` and `got` (`lang-drift`), `beforePct`, `afterPct` and `durationMs`.
 
 ## Language
 

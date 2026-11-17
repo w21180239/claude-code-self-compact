@@ -117,7 +117,7 @@ floor、node、work 都被 urgent 截顶，所以小窗口里各档向紧急档�
 
 最初的需求取第一条真实用户消息，上限 1,500 字符，在首次 `compact_now` 时存进 `<session-id>/intent.md`，之后都读这份存档：压缩过后引擎返回的 transcript 从摘要开始，每压一代，摘要都会把原意再转述走样一点。它仍在最近 5 条里时不重复附。
 
-指令上限 8,000 字符。截断顺序：`done`，再是最早的用户消息，再是 `drop`、`lessons`、最初的需求、`decisions`、`artifacts`（从末尾）。`standing_orders`、`pending`、`next` 和语言约定永不截。
+指令上限 8,000 字符。截断顺序：`done`，再是最早的用户消息，再是 `drop`、`lessons`、最初的需求、`decisions`、`artifacts`（从末尾）。`standing_orders`、`pending`、`next`、语言约定和热 skill 那一句永不截。
 
 ## 语言约定
 
@@ -128,6 +128,18 @@ floor、node、work 都被 urgent 截顶，所以小窗口里各档向紧急档�
 四个载体让约定存活：交接文件（第一节“语言约定”）；压缩指令（一句话要求 summarizer 用对话语言写摘要、第一节是这一节、每条输出规则原样照抄，不受 8,000 字符上限截断）；续接消息的第一行；压缩后前 3 条真实用户提示（composer 或 bridge 来源，不含命令和插件提示）的上下文里各附一行简短约定。
 
 漂移检查：压缩后第一条非空的主会话助手回答（`turn.complete.answer`，该轮最终可见文字）按同样的 CJK 规则分类；与对话语言的类别（对话规则里先提到的中文或英文）不同时记一行 `lang-drift`，带 `expected` 和 `got`，每次压缩只记一次。只调用工具的轮次回答为空，跳过直到出现文字。
+
+## skill 工作集
+
+压缩之后，引擎会自己把每个调用过的 skill 的完整正文重新注入（`invoked_skills` 附件，未见截断）。mod 看不到也改不了：托管登录会跳过用户 mod 的 `prompt.attachment` 和 `skill.prompt` 钩子。所以插件不改写这一步重新注入，只用 `tool.call`。压缩丢掉的是 skill 的工作集：在 skill 目录下读过的参考文件，以及工作做到流程的哪一步。压缩后的重读集中在这些参考文件上。
+
+**记录。** 按 skill 名存会话状态（名字取 `Skill` 调用时的写法；短名是最后一个冒号之后的部分，用来匹配路径）。主会话的 `Skill` 调用记下名字和当前主请求序号（`state.reqs`，每个主 `turn.step` 加一）。主会话 Read、Grep、Glob、Edit、Write 的路径，或 Bash 命令里的路径样 token，含 `/skills/<短名>/` 时更新 `lastUse`；不是该目录的 `SKILL.md` 也不是目录的话，移到 `refs` 最前（最多 8 个，去重）。带 `agentId` 的调用忽略。状态跨压缩保留，由 `resetConversation` 清除。
+
+**分档**（`tierSkills`）。`keep_skills` 里的为热。否则在 `drop_skills` 里的为已完成：模型说这个 skill 做完了，比最近用过更优先。否则 `nowReq - lastUse <= hotWindow`，或历史 `refMisses / compactions >= 0.3` 且 `compactions >= 3`，为热。其余不处理。`keep_skills` 和 `drop_skills` 是可选的字符串数组（全名或短名都行），格式不对按没给处理。
+
+**载体。** 压缩指令多一句不会被截断的话，点出热 skill，要求 summarizer 为每个写明走到哪一步、还剩什么。续接消息在语言行和 `next` 之后多一节「skill 工作集」（`renderSkillSection`）：每个热 skill 一行 `<名字>：仍在使用` 加它的参考文件，大小不超过 `refInlineK` 千 token（每 token 按 4 字符）且累计不超过 `skillBudgetK` 的用 `$.fs` 读出内联，其余只列路径（读失败也只列路径）；每个已完成 skill 一行。没有热也没有已完成的 skill 时整节省略。
+
+**学习。** 每次压缩（无论是插件发起还是自动/手动）给 `profile.json` 里每个已加载的 skill 的 `compactions` 加一（`skills: { <名字>: { compactions, refMisses } }`，写法同 P）。之后 30 个主请求内，主会话 Read 了没内联的参考文件，该 skill 的 `refMisses` 加一（每个文件一次）并记 `skill-ref-miss`；Read 已内联的文件记 `skill-ref-reread`。`done` 和 `preempted` 行带 `skills: { hot, done, inlinedK, listed }`。
 
 ## 竞态
 
@@ -175,11 +187,11 @@ floor、node、work 都被 urgent 截顶，所以小窗口里各档向紧急档�
 
 ## 数据
 
-`~/.claude/self-compact/<session-id>/handoff-<n>.md`、`~/.claude/self-compact/<session-id>/intent.md`、`~/.claude/self-compact/profile.json` 和 `~/.claude/self-compact/log.jsonl`。`profile.json` 存学到的压后大小 P，按项目（以 cwd 绝对路径为键）和全局各一份；`log.jsonl` 的行可带 `pSample` 和 `p`，`result` 还有 `p-sample`、`deprecated`、`tool-describe`。mods 不能 import `node:fs`，文件通过引擎的 `$.fs` 读写。数据不离开本机，插件不发起网络请求。
+`~/.claude/self-compact/<session-id>/handoff-<n>.md`、`~/.claude/self-compact/<session-id>/intent.md`、`~/.claude/self-compact/profile.json` 和 `~/.claude/self-compact/log.jsonl`。`profile.json` 存学到的压后大小 P，按项目（以 cwd 绝对路径为键）和全局各一份，另有 `skills`：按 skill 名记录加载它的压缩次数和漏读次数；`log.jsonl` 的行可带 `pSample` 和 `p`，`result` 还有 `p-sample`、`deprecated`、`tool-describe`。mods 不能 import `node:fs`，文件通过引擎的 `$.fs` 读写。数据不离开本机，插件不发起网络请求。
 
 超过约 2 MB 时，`log.jsonl` 会移到 `log.1.jsonl`，另起新文件；读不出来的日志原样保留，不会被覆盖。
 
-`log.jsonl` 每次请求一行 JSON：`ts`、`session`、`node`、`pct`（请求时占比）、`result`（`queued`、`denied:<原因>`、`done`、`preempted`、`aborted`、`stale`、`failed`、`error`、`p-sample`、`deprecated`、`tool-describe`、`self-check`、`self-check:compacted`、`self-check:declined`、`lang-drift`）、可选的 `reason`（`self-check:declined` 上是模型给出的跳过原因，最多 200 字符）、可选的 `pSample` 和 `p`、`langSource`（`queued`、`done`）、`expected` 和 `got`（`lang-drift`）、`beforePct`、`afterPct`、`durationMs`。
+`log.jsonl` 每次请求一行 JSON：`ts`、`session`、`node`、`pct`（请求时占比）、`result`（`queued`、`denied:<原因>`、`done`、`preempted`、`aborted`、`stale`、`failed`、`error`、`p-sample`、`deprecated`、`tool-describe`、`self-check`、`self-check:compacted`、`self-check:declined`、`lang-drift`、`skill-ref-miss`、`skill-ref-reread`）、可选的 `reason`（`self-check:declined` 上是模型给出的跳过原因，最多 200 字符）、可选的 `pSample` 和 `p`、`langSource`（`queued`、`done`）、`expected` 和 `got`（`lang-drift`）、`beforePct`、`afterPct`、`durationMs`。
 
 ## 语言
 

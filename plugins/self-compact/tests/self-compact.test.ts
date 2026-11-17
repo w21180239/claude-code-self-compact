@@ -24,8 +24,11 @@ import {
   validateHandoff,
   detectChatLang,
   mergeLanguage,
+  trackSkillCall,
+  tierSkills,
+  renderSkillSection,
 } from '../hooks/register'
-import type { Handoff, PEst } from '../hooks/register'
+import type { Handoff, PEst, SkillUse } from '../hooks/register'
 
 const TH = (p: number, window = 1_000_000, cfg = DEFAULTS) => thresholds(p, window, cfg)
 
@@ -2286,4 +2289,371 @@ test('language: an English chat with an English reply is no drift; a Chinese rep
   await turnStart($, 't2')
   await turnComplete($, 't2', false, '好的，继续做下一步。')
   expect(w.log().filter(l => l.result === 'lang-drift').length).toBe(1)
+})
+
+// ---- skill working set (S2) ----
+
+const SKS = '/home/u/.claude/skills'
+const mkSkill = (name: string, lastUse: number, refs: string[] = []): SkillUse => ({ name, short: name.slice(name.lastIndexOf(':') + 1), lastUse, refs })
+
+test('trackSkillCall: a Skill call records the name and request; the short name is the part after the last colon', () => {
+  const m = new Map<string, SkillUse>()
+  trackSkillCall(m, 'Skill', { skill: 'plug:voice' }, 7)
+  expect(m.get('plug:voice')).toEqual({ name: 'plug:voice', short: 'voice', lastUse: 7, refs: [] })
+  trackSkillCall(m, 'Skill', { skill: 'plug:voice' }, 12)
+  expect(m.get('plug:voice')?.lastUse).toBe(12)
+  trackSkillCall(m, 'Skill', { input: { skill: 'plain' } }, 13)
+  expect(m.get('plain')?.short).toBe('plain')
+  trackSkillCall(m, 'Skill', { skill: '  ' }, 14)
+  expect(m.size).toBe(2)
+})
+
+test('trackSkillCall: a Read under /skills/<short>/ adds a ref and counts as use; SKILL.md is use, not a ref', () => {
+  const m = new Map<string, SkillUse>()
+  trackSkillCall(m, 'Skill', { skill: 'plug:voice' }, 1)
+  trackSkillCall(m, 'Read', { file_path: `${SKS}/voice/references/voice.md` }, 5)
+  expect(m.get('plug:voice')).toMatchObject({ lastUse: 5, refs: [`${SKS}/voice/references/voice.md`] })
+  trackSkillCall(m, 'Read', { file_path: `${SKS}/voice/SKILL.md` }, 9)
+  expect(m.get('plug:voice')).toMatchObject({ lastUse: 9, refs: [`${SKS}/voice/references/voice.md`] })
+  // Edit/Write/Grep/Glob paths count too; another skill's dir does not.
+  trackSkillCall(m, 'Edit', { file_path: `${SKS}/voice/scripts/run.py` }, 10)
+  trackSkillCall(m, 'Write', { file_path: `${SKS}/other/x.md` }, 11)
+  expect(m.get('plug:voice')?.lastUse).toBe(10)
+  expect(m.get('plug:voice')?.refs[0]).toBe(`${SKS}/voice/scripts/run.py`)
+  trackSkillCall(m, 'Grep', { pattern: 'x', path: `${SKS}/voice/references/g.md` }, 12)
+  expect(m.get('plug:voice')?.refs[0]).toBe(`${SKS}/voice/references/g.md`)
+  trackSkillCall(m, 'Glob', { pattern: `${SKS}/voice/references/*.md` }, 13)
+  expect(m.get('plug:voice')).toMatchObject({ lastUse: 13 })
+  expect(m.get('plug:voice')?.refs.some(r => r.includes('*'))).toBe(false)
+})
+
+test('trackSkillCall: a skill that was never loaded is not tracked from a path alone', () => {
+  const m = new Map<string, SkillUse>()
+  trackSkillCall(m, 'Read', { file_path: `${SKS}/voice/references/voice.md` }, 5)
+  expect(m.size).toBe(0)
+})
+
+test('trackSkillCall: path-like tokens in a Bash command are detected', () => {
+  const m = new Map<string, SkillUse>()
+  trackSkillCall(m, 'Skill', { skill: 'voice' }, 1)
+  trackSkillCall(m, 'Bash', { command: `cat "${SKS}/voice/references/a.md" | head -5 && ls ${SKS}/voice/` }, 6)
+  expect(m.get('voice')).toMatchObject({ lastUse: 6, refs: [`${SKS}/voice/references/a.md`] })
+  trackSkillCall(m, 'Bash', { command: 'echo /skills/voice-extra/x.md' }, 8)
+  expect(m.get('voice')?.lastUse).toBe(6)
+})
+
+test('trackSkillCall: refs keep at most 8, newest first, deduplicated', () => {
+  const m = new Map<string, SkillUse>()
+  trackSkillCall(m, 'Skill', { skill: 'voice' }, 1)
+  for (let i = 1; i <= 10; i++) trackSkillCall(m, 'Read', { file_path: `${SKS}/voice/r${i}.md` }, 1 + i)
+  const refs = m.get('voice')?.refs ?? []
+  expect(refs.length).toBe(8)
+  expect(refs[0]).toBe(`${SKS}/voice/r10.md`)
+  expect(refs.at(-1)).toBe(`${SKS}/voice/r3.md`)
+  trackSkillCall(m, 'Read', { file_path: `${SKS}/voice/r5.md` }, 20)
+  expect(m.get('voice')?.refs.slice(0, 2)).toEqual([`${SKS}/voice/r5.md`, `${SKS}/voice/r10.md`])
+  expect(m.get('voice')?.refs.length).toBe(8)
+})
+
+test('tierSkills: used within hotWindow is hot, older is nothing', () => {
+  const t = tierSkills([mkSkill('a', 80), mkSkill('b', 79), mkSkill('c', 10)], [], [], 100, 20, {})
+  expect(t.hot.map(s => s.name)).toEqual(['a'])
+  expect(t.done).toEqual([])
+})
+
+test('tierSkills: keep_skills makes a skill hot whatever its age, by name or short name', () => {
+  const t = tierSkills([mkSkill('plug:old', 1), mkSkill('c', 1)], ['old'], [], 100, 20, {})
+  expect(t.hot.map(s => s.name)).toEqual(['plug:old'])
+  expect(tierSkills([mkSkill('plug:old', 1)], ['plug:old'], [], 100, 20, {}).hot.length).toBe(1)
+})
+
+test('tierSkills: drop_skills is done, keep beats drop, and drop beats recent use', () => {
+  const t = tierSkills([mkSkill('a', 99), mkSkill('b', 99), mkSkill('c', 1)], ['b'], ['a', 'b', 'c'], 100, 20, {})
+  expect(t.hot.map(s => s.name)).toEqual(['b'])
+  expect(t.done.map(s => s.name)).toEqual(['a', 'c'])
+})
+
+test('tierSkills: a prior miss rate of 0.3 over at least 3 compactions makes a skill hot', () => {
+  const sk = [mkSkill('a', 1)]
+  const pri = (compactions: number, refMisses: number) => ({ a: { compactions, refMisses } })
+  expect(tierSkills(sk, [], [], 100, 20, pri(3, 1)).hot.length).toBe(1)
+  expect(tierSkills(sk, [], [], 100, 20, pri(10, 3)).hot.length).toBe(1)
+  expect(tierSkills(sk, [], [], 100, 20, pri(3, 0)).hot.length).toBe(0)
+  expect(tierSkills(sk, [], [], 100, 20, pri(10, 2)).hot.length).toBe(0)
+  // n gate: a perfect miss rate over fewer than 3 compactions is not enough.
+  expect(tierSkills(sk, [], [], 100, 20, pri(2, 2)).hot.length).toBe(0)
+})
+
+test('tierSkills: hot skills are ordered by recency', () => {
+  const t = tierSkills([mkSkill('a', 85), mkSkill('b', 95), mkSkill('c', 90)], [], [], 100, 20, {})
+  expect(t.hot.map(s => s.name)).toEqual(['b', 'c', 'a'])
+})
+
+const hotOf = (name: string, refs: { path: string; content?: string }[]) => ({ name, refs })
+
+test('renderSkillSection: small refs inline within the budget, big or unreadable ones are listed', () => {
+  const refs = [
+    { path: `${SKS}/voice/a.md`, content: 'A'.repeat(4_000) },
+    { path: `${SKS}/voice/b.md`, content: 'B'.repeat(12_000) },
+    { path: `${SKS}/voice/c.md` },
+  ]
+  const r = renderSkillSection([hotOf('voice', refs)], [], 'en', 2, 6)
+  expect(r?.text).toContain('Skill working set')
+  expect(r?.text).toContain('voice: still in use')
+  expect(r?.text).toContain('A'.repeat(4_000))
+  expect(r?.text).not.toContain('B')
+  expect(r?.text).toContain(`${SKS}/voice/b.md`)
+  expect(r?.text).toContain('re-read when needed')
+  expect(r?.text).toContain(`${SKS}/voice/c.md`)
+  expect(r?.inlined).toEqual([`${SKS}/voice/a.md`])
+  expect(r?.listed).toBe(2)
+  expect(r?.inlinedK).toBe(1)
+})
+
+test('renderSkillSection: the total budget caps inlining, in recency order across skills', () => {
+  const six = (n: string) => Array.from({ length: 3 }, (_, i) => ({ path: `${SKS}/${n}/r${i}.md`, content: `${n}${i}`.padEnd(6_000, '.') }))
+  const r = renderSkillSection([hotOf('a', six('a')), hotOf('b', six('b'))], [], 'en', 2, 6)
+  expect(r?.inlined).toEqual([`${SKS}/a/r0.md`, `${SKS}/a/r1.md`, `${SKS}/a/r2.md`, `${SKS}/b/r0.md`])
+  expect(r?.listed).toBe(2)
+  expect(r?.inlinedK).toBe(6)
+  // refInlineK 0 inlines nothing.
+  expect(renderSkillSection([hotOf('a', six('a'))], [], 'en', 0, 6)?.inlined).toEqual([])
+})
+
+test('renderSkillSection: a done skill gets one finished line; nothing hot or done gives no section', () => {
+  const r = renderSkillSection([], ['pdf'], 'en', 2, 6)
+  expect(r?.text).toContain('pdf')
+  expect(r?.text).toContain('finished')
+  expect(r?.text).toContain('no longer apply')
+  expect(renderSkillSection([], [], 'en', 2, 6)).toBeUndefined()
+  const zh = renderSkillSection([hotOf('voice', [])], ['pdf'], 'zh', 2, 6)
+  expect(zh?.text).toContain('skill 工作集')
+  expect(zh?.text).toContain('voice')
+  expect(zh?.text).toContain('已完成')
+})
+
+test('continuationText: the skill section follows next and precedes the standing orders', () => {
+  const base = { node: 'N', beforePct: 31, handoffPath: '/x/h.md', next: 'go', standing_orders: ['S1'], pending: [], language: LANG }
+  const out = continuationText({ ...base, skills: 'SKILL_SECTION' }, 'en')
+  expect(out.split('\n')[0]).toContain('Chat:')
+  expect(out.indexOf('Next step: go')).toBeLessThan(out.indexOf('SKILL_SECTION'))
+  expect(out.indexOf('SKILL_SECTION')).toBeLessThan(out.indexOf('S1'))
+  expect(continuationText(base, 'en')).not.toContain('SKILL_SECTION')
+})
+
+test('instructions: the hot skill line is present and survives heavy trimming', () => {
+  const h: Handoff = { ...HANDOFF, language: LANG, done: ['d'.repeat(20_000)], decisions: ['x'.repeat(9_000)], artifacts: ['y'.repeat(9_000)] }
+  const msgs = [1, 2, 3].map(i => `USER_${i} ` + 'u'.repeat(3_000))
+  const out = buildInstructions(h, msgs, '/x/handoff-1.md', 'en', 'I'.repeat(1_400), ['voice', 'plug:pdf'])
+  expect(out.length <= 8_000).toBe(true)
+  expect(out).toContain('voice, plug:pdf')
+  expect(out).toContain('step')
+  const zh = buildInstructions(h, msgs, '/x/handoff-1.md', 'zh', undefined, ['voice'])
+  expect(zh).toContain('voice')
+  expect(zh).toContain('工作集')
+  expect(buildInstructions(HANDOFF, [], '/x/h.md', 'en')).not.toContain('Skills in use')
+  expect(buildInstructions(HANDOFF, [], '/x/h.md', 'en', undefined, [])).not.toContain('Skills in use')
+})
+
+test('validateHandoff: keep_skills and drop_skills are optional, malformed ones are ignored', () => {
+  const ok = validateHandoff({ ...HANDOFF, keep_skills: [' voice ', ''], drop_skills: ['pdf'] })
+  expect(ok.ok && ok.h.keep_skills).toEqual(['voice'])
+  expect(ok.ok && ok.h.drop_skills).toEqual(['pdf'])
+  const none = validateHandoff(HANDOFF)
+  expect(none.ok && none.h.keep_skills).toBeUndefined()
+  for (const bad of ['voice', 7, null, [1, 2], { a: 1 }]) {
+    const v = validateHandoff({ ...HANDOFF, keep_skills: bad, drop_skills: bad })
+    expect(v.ok).toBe(true)
+    expect(v.ok && v.h.keep_skills).toBeUndefined()
+    expect(v.ok && v.h.drop_skills).toBeUndefined()
+  }
+})
+
+test('configFrom: hotWindow, refInlineK and skillBudgetK default and validate', () => {
+  expect([DEFAULTS.hotWindow, DEFAULTS.refInlineK, DEFAULTS.skillBudgetK]).toEqual([20, 2, 6])
+  expect(configFrom({ hotWindow: 5, refInlineK: 1, skillBudgetK: 3 })).toMatchObject({ hotWindow: 5, refInlineK: 1, skillBudgetK: 3 })
+  expect(configFrom({ hotWindow: 'x', refInlineK: undefined, skillBudgetK: '' })).toMatchObject({ hotWindow: 20, refInlineK: 2, skillBudgetK: 6 })
+  expect(configFrom({ hotWindow: 0 }).hotWindow).toBe(1)
+  expect(configFrom({ refInlineK: -3, skillBudgetK: -1 })).toMatchObject({ refInlineK: 0, skillBudgetK: 0 })
+})
+
+test('compact_now: the schema describes keep_skills and drop_skills in both languages', async ($, on) => {
+  const w = engine(on)
+  await start($)
+  const schema = (w.registered[0] as unknown as { inputSchema: { required: string[]; properties: Record<string, { description: string; type: string }> } }).inputSchema
+  expect(schema.properties.keep_skills.description).toBe(STRINGS.en.keep_skills)
+  expect(schema.properties.drop_skills.description).toBe(STRINGS.en.drop_skills)
+  expect(schema.required).not.toContain('keep_skills')
+  expect(STRINGS.zh.keep_skills).not.toBe(STRINGS.en.keep_skills)
+  expect(STRINGS.zh.drop_skills).not.toBe(STRINGS.en.drop_skills)
+})
+
+const skillCall = ($: Dollar, skill: string) => $.tool.call({ tool: 'Skill', skill } as never)
+const readFile = ($: Dollar, file_path: string, extra: Record<string, unknown> = {}) => $.tool.call({ tool: 'Read', file_path, ...extra } as never)
+
+/** Loads the skill `voice` with two refs (one small, one big), then compacts. */
+async function skillSession($: Dollar, on: On, handoff: Record<string, unknown> = langHandoff(), cfg?: { reqs?: number }) {
+  const w = engine(on)
+  w.files.set(`${SKS}/voice/references/small.md`, 'SMALL_REF_BODY')
+  w.files.set(`${SKS}/voice/references/big.md`, 'B'.repeat(9_000))
+  await start($)
+  await modelStep($, w, 65_000)
+  await skillCall($, 'plug:voice')
+  await readFile($, `${SKS}/voice/references/big.md`)
+  await readFile($, `${SKS}/voice/references/small.md`)
+  for (let i = 0; i < (cfg?.reqs ?? 0); i++) await modelStep($, w, 65_000)
+  await turnStart($, 't1')
+  await call($, handoff)
+  await turnComplete($, 't1')
+  await w.clock.advance(1_500)
+  return w
+}
+
+test('skills: the resume message carries the working set after the language line and next', async ($, on) => {
+  const w = await skillSession($, on)
+  const text = w.submits[0].text
+  expect(text.split('\n')[0]).toContain('Chat:')
+  const iNext = text.indexOf('Next step')
+  const iSkill = text.indexOf('Skill working set')
+  expect(iSkill).toBeGreaterThan(iNext)
+  expect(text).toContain('plug:voice: still in use')
+  expect(text).toContain('SMALL_REF_BODY')
+  expect(text).toContain(`${SKS}/voice/references/big.md`)
+  expect(text).not.toContain('BBBBBBBB')
+  expect(w.compactCalls[0]).toContain('plug:voice')
+  const done = w.log().find(l => l.result === 'done') as unknown as { skills: { hot: string[]; done: string[]; inlinedK: number; listed: number } }
+  expect(done.skills).toEqual({ hot: ['plug:voice'], done: [], inlinedK: 0, listed: 1 })
+})
+
+test('skills: no skills loaded means no section and no skills log field', async ($, on) => {
+  const w = await compacted($, on)
+  expect(w.submits[0].text).not.toContain('Skill working set')
+  expect(w.log().find(l => l.result === 'done')).not.toHaveProperty('skills')
+  expect(w.compactCalls[0]).not.toContain('Skills in use')
+})
+
+test('skills: keep_skills revives an old skill', async ($, on) => {
+  const w = await skillSession($, on, { ...langHandoff(), keep_skills: ['voice'] }, { reqs: 30 })
+  expect(w.submits[0].text).toContain('plug:voice: still in use')
+  expect(w.compactCalls[0]).toContain('plug:voice')
+})
+
+test('skills: drop_skills ends a skill with a finished line', async ($, on) => {
+  const w = await skillSession($, on, { ...langHandoff(), drop_skills: ['plug:voice'] })
+  expect(w.submits[0].text).toContain('plug:voice')
+  expect(w.submits[0].text).toContain('finished')
+  expect(w.submits[0].text).not.toContain('still in use')
+  expect(w.compactCalls[0]).not.toContain('Skills in use')
+})
+
+test('skills: an unused skill older than hotWindow is left out entirely', async ($, on) => {
+  const w = await skillSession($, on, langHandoff(), { reqs: 25 })
+  expect(w.submits[0].text).not.toContain('Skill working set')
+})
+
+test('skills: subagent calls are ignored and a new conversation clears the set', async ($, on) => {
+  const w = engine(on)
+  await start($)
+  await $.tool.call({ tool: 'Skill', skill: 'voice', agentId: 'sub1' } as never)
+  await call($, langHandoff())
+  await turnComplete($, 't1')
+  await w.clock.advance(1_500)
+  expect(w.submits[0].text).not.toContain('Skill working set')
+  await skillCall($, 'voice')
+  await $.session.end({ sessionId: 'sess1' } as never)
+  await start($)
+  w.usage.tokens = 200_000
+  await call($, langHandoff())
+  await turnComplete($, 't2')
+  await w.clock.advance(1_500)
+  expect(w.submits.at(-1)?.text).not.toContain('Skill working set')
+})
+
+const profileSkills = (w: W) => (JSON.parse(w.files.get(`${ROOT}/profile.json`) ?? '{}') as { skills?: Record<string, { compactions: number; refMisses: number }> }).skills
+
+test('skills: a compaction counts per loaded skill in profile.json', async ($, on) => {
+  const w = await skillSession($, on)
+  expect(profileSkills(w)).toEqual({ 'plug:voice': { compactions: 1, refMisses: 0 } })
+})
+
+test('skills learning: a non-inlined ref read within 30 requests is a miss, an inlined one only a reread', async ($, on) => {
+  const w = await skillSession($, on)
+  for (let i = 0; i < 5; i++) await modelStep($, w, 65_000)
+  await readFile($, `${SKS}/voice/references/small.md`)
+  expect(w.log().filter(l => l.result === 'skill-ref-reread').length).toBe(1)
+  expect(w.log().filter(l => l.result === 'skill-ref-miss').length).toBe(0)
+  await readFile($, `${SKS}/voice/references/big.md`)
+  const miss = w.log().filter(l => l.result === 'skill-ref-miss')
+  expect(miss.length).toBe(1)
+  expect(miss[0]).toMatchObject({ skill: 'plug:voice', path: `${SKS}/voice/references/big.md` })
+  expect(profileSkills(w)?.['plug:voice']).toEqual({ compactions: 1, refMisses: 1 })
+  // The same ref again within the window is not a second miss.
+  await readFile($, `${SKS}/voice/references/big.md`)
+  expect(profileSkills(w)?.['plug:voice']?.refMisses).toBe(1)
+})
+
+test('skills learning: a read after 30 requests is neither a miss nor a reread', async ($, on) => {
+  const w = await skillSession($, on)
+  for (let i = 0; i < 31; i++) await modelStep($, w, 65_000)
+  await readFile($, `${SKS}/voice/references/big.md`)
+  await readFile($, `${SKS}/voice/references/small.md`)
+  expect(w.log().filter(l => l.result.startsWith('skill-ref')).length).toBe(0)
+  expect(profileSkills(w)?.['plug:voice']?.refMisses).toBe(0)
+})
+
+test('skills learning: a subagent read is not a miss', async ($, on) => {
+  const w = await skillSession($, on)
+  await readFile($, `${SKS}/voice/references/big.md`, { agentId: 'sub1' })
+  expect(w.log().filter(l => l.result.startsWith('skill-ref')).length).toBe(0)
+})
+
+test('skills: a prior miss rate from profile.json makes an idle skill hot at the next compaction', async ($, on) => {
+  const w = engine(on)
+  w.files.set(`${ROOT}/profile.json`, JSON.stringify({ byProject: {}, skills: { voice: { compactions: 4, refMisses: 2 } } }))
+  await start($)
+  await skillCall($, 'voice')
+  for (let i = 0; i < 30; i++) await modelStep($, w, 65_000)
+  await turnStart($, 't1')
+  await call($, langHandoff())
+  await turnComplete($, 't1')
+  await w.clock.advance(1_500)
+  expect(w.submits[0].text).toContain('voice: still in use')
+  expect(profileSkills(w)?.voice).toEqual({ compactions: 5, refMisses: 2 })
+})
+
+test('skills: an unreadable ref is listed, not inlined', async ($, on) => {
+  const w = engine(on)
+  await start($)
+  await skillCall($, 'voice')
+  await readFile($, `${SKS}/voice/references/gone.md`)
+  await turnStart($, 't1')
+  await call($, langHandoff())
+  await turnComplete($, 't1')
+  await w.clock.advance(1_500)
+  const text = w.submits[0]?.text ?? ''
+  expect(text).toContain(`${SKS}/voice/references/gone.md`)
+  expect(text).toContain('re-read when needed')
+})
+
+test('skills: hotWindow comes from settings', { options: { hotWindow: 1 } }, async ($, on) => {
+  const w = await skillSession($, on, langHandoff(), { reqs: 3 })
+  expect(w.submits[0].text).not.toContain('Skill working set')
+})
+
+test('skills: refInlineK=0 lists every ref, skillBudgetK caps the total', { options: { refInlineK: 0 } }, async ($, on) => {
+  const w = await skillSession($, on)
+  expect(w.submits[0].text).toContain(`${SKS}/voice/references/small.md`)
+  expect(w.submits[0].text).not.toContain('SMALL_REF_BODY')
+})
+
+test('skills learning: an auto or manual compaction counts too, and every ref is a miss then', async ($, on) => {
+  const w = engine(on)
+  w.files.set(`${SKS}/voice/references/small.md`, 'SMALL_REF_BODY')
+  await start($)
+  await skillCall($, 'voice')
+  await readFile($, `${SKS}/voice/references/small.md`)
+  await $.session.compact({ trigger: 'auto', messages: [{ role: 'user', text: 'x', toolUses: [] }] } as never)
+  expect(profileSkills(w)).toEqual({ voice: { compactions: 1, refMisses: 0 } })
+  await readFile($, `${SKS}/voice/references/small.md`)
+  expect(profileSkills(w)).toEqual({ voice: { compactions: 1, refMisses: 1 } })
 })
