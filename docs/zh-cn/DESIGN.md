@@ -117,7 +117,17 @@ floor、node、work 都被 urgent 截顶，所以小窗口里各档向紧急档�
 
 最初的需求取第一条真实用户消息，上限 1,500 字符，在首次 `compact_now` 时存进 `<session-id>/intent.md`，之后都读这份存档：压缩过后引擎返回的 transcript 从摘要开始，每压一代，摘要都会把原意再转述走样一点。它仍在最近 5 条里时不重复附。
 
-指令上限 8,000 字符。截断顺序：`done`，再是最早的用户消息，再是 `drop`、`lessons`、最初的需求、`decisions`、`artifacts`（从末尾）。`standing_orders`、`pending`、`next` 永不截。
+指令上限 8,000 字符。截断顺序：`done`，再是最早的用户消息，再是 `drop`、`lessons`、最初的需求、`decisions`、`artifacts`（从末尾）。`standing_orders`、`pending`、`next` 和语言约定永不截。
+
+## 语言约定
+
+用户用一种语言聊天，却要求代码、commit、PR、spec 和对外文字用别的语言，压缩时这个划分会丢：摘要用英文写，规则只是众多条目里的一条。所以 `compact_now` 有 `language` 字段，`{ chat, outputs[] }`：schema 里必填，校验时可选（格式不对按缺失处理，缺失永不阻止压缩）。
+
+`mergeLanguage(prev, given, detected)` 逐字段合并：本次给的非空值优先，其次是上一次压缩的，`chat` 最后回落到 `detectChatLang`，即最近 5 条真实用户消息里 CJK 字符占非空白字符 >= 30% 记 `zh`，否则 `en`，空输入返回 undefined，并按配置的界面语言写成语言名。`source` 记录 `chat` 的来源（`tool`、`inherited`、`detected`、`none`），在 `queued` 和 `done` 行里记为 `langSource`。插件自己提交的提示（续接消息、自检、提醒）不参与检测，也不进“最近消息”；续接消息前面多了语言行时仍能识别。合并后的约定存在会话状态里，每次压缩都保留；`resetConversation` 与其他按会话的状态一起清除（新会话、`/clear`、`/resume`）。
+
+四个载体让约定存活：交接文件（第一节“语言约定”）；压缩指令（一句话要求 summarizer 用对话语言写摘要、第一节是这一节、每条输出规则原样照抄，不受 8,000 字符上限截断）；续接消息的第一行；压缩后前 3 条真实用户提示（composer 或 bridge 来源，不含命令和插件提示）的上下文里各附一行简短约定。
+
+漂移检查：压缩后第一条非空的主会话助手回答（`turn.complete.answer`，该轮最终可见文字）按同样的 CJK 规则分类；与对话语言的类别（对话规则里先提到的中文或英文）不同时记一行 `lang-drift`，带 `expected` 和 `got`，每次压缩只记一次。只调用工具的轮次回答为空，跳过直到出现文字。
 
 ## 竞态
 
@@ -169,7 +179,7 @@ floor、node、work 都被 urgent 截顶，所以小窗口里各档向紧急档�
 
 超过约 2 MB 时，`log.jsonl` 会移到 `log.1.jsonl`，另起新文件；读不出来的日志原样保留，不会被覆盖。
 
-`log.jsonl` 每次请求一行 JSON：`ts`、`session`、`node`、`pct`（请求时占比）、`result`（`queued`、`denied:<原因>`、`done`、`preempted`、`aborted`、`stale`、`failed`、`error`、`p-sample`、`deprecated`、`tool-describe`、`self-check`、`self-check:compacted`、`self-check:declined`）、可选的 `reason`（`self-check:declined` 上是模型给出的跳过原因，最多 200 字符）、可选的 `pSample` 和 `p`、`beforePct`、`afterPct`、`durationMs`。
+`log.jsonl` 每次请求一行 JSON：`ts`、`session`、`node`、`pct`（请求时占比）、`result`（`queued`、`denied:<原因>`、`done`、`preempted`、`aborted`、`stale`、`failed`、`error`、`p-sample`、`deprecated`、`tool-describe`、`self-check`、`self-check:compacted`、`self-check:declined`、`lang-drift`）、可选的 `reason`（`self-check:declined` 上是模型给出的跳过原因，最多 200 字符）、可选的 `pSample` 和 `p`、`langSource`（`queued`、`done`）、`expected` 和 `got`（`lang-drift`）、`beforePct`、`afterPct`、`durationMs`。
 
 ## 语言
 

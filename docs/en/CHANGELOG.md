@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.0 - 2026-11-18
+
+- Added: `compact_now` takes a required `language` field, `{ chat, outputs[] }`: the conversation language and one verbatim rule per output channel. A missing or malformed value never blocks a compaction. Per field the given value wins, then the rules inherited from the previous compaction, then (for `chat`) the language detected from the last 5 real user messages (CJK >= 30% of non-space characters is Chinese).
+- Added: the rules ride four carriers: a first "Language rules" section in the handoff file, a never-trimmed line in the compact instructions telling the summarizer to write in the chat language and copy each rule verbatim, the first line of the continuation prompt, and a short rule line appended to the first 3 real user prompts after a compaction.
+- Added: `log.jsonl` rows `queued` and `done` carry `langSource` (`tool`, `inherited`, `detected`, `none`); `lang-drift` (with `expected` and `got`) is logged once when the first assistant reply after a compaction is in the other language.
+- Fixed: the self-check prompts and nudges the plugin submits no longer count as user messages in the handoff's recent messages.
+
 ## 0.5.0 - 2026-11-18
 
 - Changed: every threshold derives from P, the learned post-compact size. The floor is `max(C(floorCalls), floorPct x window)`; the node, work and urgent tiers follow, with `C(N) = (10 x F + N x P) / (N - 1)` and `F` = `compactCostK`. Each tier is capped at `urgent = min(urgentK x 1k, 0.8 x window)`.

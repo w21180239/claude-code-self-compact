@@ -22,6 +22,8 @@ import {
   renderHandoff,
   TOOL_FULL,
   validateHandoff,
+  detectChatLang,
+  mergeLanguage,
 } from '../hooks/register'
 import type { Handoff, PEst } from '../hooks/register'
 
@@ -2019,4 +2021,269 @@ test('tool.describe: uses the window the last step read', async ($, on) => {
   const small = (await describeTool($)).description
   expect(small).not.toBe(ref)
   expect(small).toContain('%')
+})
+
+// ---- language rules ----
+
+const LANG = { chat: 'Chinese, English terms/identifiers OK', outputs: ['code/commit/PR: English', 'personal spec: Chinese'] }
+const LANG_ZH = { chat: '中文，可夹英文术语', outputs: ['代码/commit/PR：英文', 'personal spec：中文'] }
+
+test('detectChatLang: zh, en and empty', () => {
+  expect(detectChatLang(['请继续做 Task 3', '好的，先看测试'])).toBe('zh')
+  expect(detectChatLang(['please continue with task 3'])).toBe('en')
+  expect(detectChatLang([])).toBeUndefined()
+  // 3 CJK of 10 non-space chars is exactly the 0.3 boundary.
+  expect(detectChatLang(['abcdefg 中中中'])).toBe('zh')
+  expect(detectChatLang(['abcdefgh 中中'])).toBe('en')
+})
+
+test('detectChatLang: plugin-injected prompts are ignored', () => {
+  const injected = [
+    '[self-compact] Node "x" compacted (context 20% → 8%). Handoff: /x',
+    '节点「x」已压缩（上下文 20% → 8%）。交接单：/x',
+    '对话：中文｜代码：英文\n\n节点「x」已压缩（上下文 20% → 8%）。交接单：/x',
+    'Chat: Chinese | code: English\n\n[self-compact] Node "x" compacted (context 20% → 8%). Handoff: /x',
+    '[self-compact self-check] The last turn showed a node signal',
+    '[self-compact 自检] 上一轮出现了节点信号',
+    '[self-compact] 上下文 30%，已过回本线',
+  ]
+  expect(detectChatLang([...injected, 'plain english message'])).toBe('en')
+  expect(detectChatLang(injected)).toBeUndefined()
+})
+
+test('detectChatLang: only the last 5 real messages count', () => {
+  const longZh = '这是一条很长的中文消息'.repeat(10)
+  expect(detectChatLang([longZh, ...Array.from({ length: 5 }, () => 'ok')])).toBe('en')
+  expect(detectChatLang([longZh, ...Array.from({ length: 4 }, () => 'ok')])).toBe('zh')
+  expect(detectChatLang([...Array.from({ length: 2 }, () => 'english words here'), ...Array.from({ length: 5 }, () => '这是一条中文消息')])).toBe('zh')
+})
+
+test('mergeLanguage: given beats prev, per sub-field', () => {
+  const prev = { chat: 'English', outputs: ['code: English'] }
+  expect(mergeLanguage(prev, LANG, 'en', 'en')).toEqual({ ...LANG, source: 'tool' })
+  // A partial given inherits the rest from prev.
+  expect(mergeLanguage(prev, { chat: '', outputs: ['spec: Chinese'] }, 'en', 'en')).toEqual({
+    chat: 'English',
+    outputs: ['spec: Chinese'],
+    source: 'inherited',
+  })
+  expect(mergeLanguage(prev, { chat: 'Chinese', outputs: [] }, 'en', 'en')).toEqual({
+    chat: 'Chinese',
+    outputs: ['code: English'],
+    source: 'tool',
+  })
+})
+
+test('mergeLanguage: prev, then detected in the current language, then none', () => {
+  const prev = { chat: 'English', outputs: ['code: English'] }
+  expect(mergeLanguage(prev, undefined, 'zh', 'en')).toEqual({ ...prev, source: 'inherited' })
+  expect(mergeLanguage(undefined, undefined, 'zh', 'en')).toEqual({ chat: 'Chinese', outputs: [], source: 'detected' })
+  expect(mergeLanguage(undefined, undefined, 'zh', 'zh')).toEqual({ chat: '中文', outputs: [], source: 'detected' })
+  expect(mergeLanguage(undefined, undefined, 'en', 'zh')).toEqual({ chat: '英文', outputs: [], source: 'detected' })
+  expect(mergeLanguage(undefined, { chat: '', outputs: ['code: English'] }, 'en', 'en')).toEqual({
+    chat: 'English',
+    outputs: ['code: English'],
+    source: 'detected',
+  })
+  expect(mergeLanguage(undefined, undefined, undefined, 'en')).toEqual({ chat: '', outputs: [], source: 'none' })
+})
+
+test('validateHandoff: language is optional and malformed language is dropped', () => {
+  const ok = validateHandoff({ ...HANDOFF, language: LANG })
+  expect(ok.ok && ok.h.language).toEqual(LANG)
+  const none = validateHandoff(HANDOFF)
+  expect(none.ok && none.h.language).toBeUndefined()
+  for (const bad of ['zh', 42, null, { chat: 5, outputs: [] }, { chat: 'x', outputs: 'y' }, { chat: 'x', outputs: [1] }, { outputs: ['a'] }]) {
+    const v = validateHandoff({ ...HANDOFF, language: bad })
+    expect(v.ok).toBe(true)
+    expect(v.ok && v.h.language).toBeUndefined()
+  }
+})
+
+test('renderHandoff: Language rules is the first section', () => {
+  const en = renderHandoff({ ...HANDOFF, language: LANG }, [], 'en')
+  expect(en.indexOf('## Language rules')).toBeGreaterThan(0)
+  expect(en.indexOf('## Language rules')).toBeLessThan(en.indexOf('## Objective'))
+  expect(en).toContain('code/commit/PR: English')
+  expect(en).toContain(LANG.chat)
+  const zh = renderHandoff({ ...HANDOFF, language: LANG_ZH }, [], 'zh')
+  expect(zh.indexOf('## 语言约定')).toBeLessThan(zh.indexOf('## 目标'))
+  expect(zh).toContain('personal spec：中文')
+  expect(renderHandoff(HANDOFF, [], 'en')).not.toContain('Language rules')
+})
+
+test('instructions: summary language line is present and survives heavy trimming', () => {
+  const h: Handoff = { ...HANDOFF, language: LANG, done: ['d'.repeat(20_000)], decisions: ['x'.repeat(9_000)], artifacts: ['y'.repeat(9_000)] }
+  const msgs = [1, 2, 3].map(i => `USER_${i} ` + 'u'.repeat(3_000))
+  const out = buildInstructions(h, msgs, '/x/handoff-1.md', 'en', 'I'.repeat(1_400))
+  expect(out).toContain(`write the summary in ${LANG.chat}`)
+  expect(out).toContain("first section is 'Language rules'")
+  for (const r of LANG.outputs) expect(out).toContain(r)
+  const zh = buildInstructions({ ...h, language: LANG_ZH }, msgs, '/x/handoff-1.md', 'zh')
+  expect(zh).toContain(`用「${LANG_ZH.chat}」写摘要`)
+  expect(zh).toContain('第一节是「语言约定」')
+  expect(buildInstructions(HANDOFF, [], '/x/h.md', 'en')).not.toContain('Language rules')
+})
+
+test('continuationText: the language line comes first', () => {
+  const base = { node: 'N', beforePct: 31, handoffPath: '/x/h.md', next: 'go', standing_orders: [], pending: [] }
+  const en = continuationText({ ...base, language: LANG }, 'en')
+  expect(en.split('\n')[0]).toBe('Chat: Chinese, English terms/identifiers OK | code/commit/PR: English | personal spec: Chinese')
+  expect(en.indexOf('Next step')).toBeGreaterThan(0)
+  const zh = continuationText({ ...base, language: LANG_ZH }, 'zh')
+  expect(zh.split('\n')[0]).toBe('对话：中文，可夹英文术语｜代码/commit/PR：英文｜personal spec：中文')
+  expect(continuationText(base, 'en').startsWith('[self-compact] Node')).toBe(true)
+})
+
+test('realUserMessages: the resume message with a language line is not a user message', () => {
+  const resume = continuationText({ node: 'N', beforePct: 1, handoffPath: '/x', standing_orders: [], pending: [], language: LANG }, 'en')
+  expect(realUserMessages([{ role: 'user', text: resume }, { role: 'user', text: 'hello' }])).toEqual(['hello'])
+  expect(realUserMessages([{ role: 'user', text: '[self-compact self-check] x' }])).toEqual([])
+})
+
+const langHandoff = (language: unknown = LANG) => ({ ...HANDOFF, language })
+
+async function compacted($: Dollar, on: On, language: unknown = LANG, usage?: { tokens?: number; window?: number }) {
+  const w = engine(on, usage)
+  await start($)
+  await turnStart($, 't1')
+  await call($, langHandoff(language))
+  await turnComplete($, 't1')
+  await w.clock.advance(1_500)
+  return w
+}
+
+test('compact_now: schema requires language and describes it in both languages', async ($, on) => {
+  const w = engine(on)
+  await start($)
+  const schema = (w.registered[0] as unknown as { inputSchema: { required: string[]; properties: Record<string, { description: string; properties?: object }> } }).inputSchema
+  expect(schema.required).toContain('language')
+  expect(schema.properties.language.description).toBe(STRINGS.en.language)
+  expect(Object.keys(schema.properties.language.properties ?? {})).toEqual(['chat', 'outputs'])
+  expect(STRINGS.zh.language).not.toBe(STRINGS.en.language)
+})
+
+test('compact_now: a missing language never blocks and falls back to the detected language', async ($, on) => {
+  const w = engine(on)
+  await start($)
+  const r = await call($, HANDOFF)
+  expect(r.deny).toBeUndefined()
+  expect(w.log().at(-1)).toMatchObject({ result: 'queued', langSource: 'detected' })
+  const file = w.files.get(`${ROOT}/sess1/handoff-1.md`) ?? ''
+  expect(file).toContain('## Language rules')
+  expect(file).toContain('Chat: Chinese')
+})
+
+test('compact_now: no messages and no language logs langSource none and omits the section', async ($, on) => {
+  const w = engine(on)
+  w.messages.length = 0
+  await start($)
+  await call($, HANDOFF)
+  expect(w.log().at(-1)).toMatchObject({ result: 'queued', langSource: 'none' })
+  expect(w.files.get(`${ROOT}/sess1/handoff-1.md`) ?? '').not.toContain('Language rules')
+})
+
+test('language: handoff file, instructions and resume line carry the rules', async ($, on) => {
+  const w = await compacted($, on)
+  expect(w.log().find(l => l.result === 'queued')).toMatchObject({ langSource: 'tool' })
+  expect(w.log().find(l => l.result === 'done')).toMatchObject({ langSource: 'tool' })
+  const file = w.files.get(`${ROOT}/sess1/handoff-1.md`) ?? ''
+  expect(file.indexOf('## Language rules')).toBeLessThan(file.indexOf('## Objective'))
+  expect(w.compactCalls[0]).toContain(`write the summary in ${LANG.chat}`)
+  expect(w.compactCalls[0]).toContain('personal spec: Chinese')
+  expect(w.submits[0].text.split('\n')[0]).toBe('Chat: Chinese, English terms/identifiers OK | code/commit/PR: English | personal spec: Chinese')
+})
+
+test('language: the resume line is Chinese under language=zh', { options: { language: 'zh' } }, async ($, on) => {
+  const w = await compacted($, on, LANG_ZH)
+  expect(w.submits[0].text.split('\n')[0]).toBe('对话：中文，可夹英文术语｜代码/commit/PR：英文｜personal spec：中文')
+  expect(w.compactCalls[0]).toContain(`用「${LANG_ZH.chat}」写摘要`)
+})
+
+test('language: the first 3 real turns after a compaction get the rule line, the 4th and injected prompts do not', async ($, on) => {
+  const w = await compacted($, on)
+  const line = (): string => (w.submits.at(-1)?.context ?? []).join('\n')
+  // The resume message and a background notification are not turns.
+  await $.prompt.submit({ text: 'bg done', origin: { kind: 'task-notification' }, wait: false } as never)
+  expect(line()).not.toContain('code/commit/PR: English')
+  await $.prompt.submit({ text: '[self-compact self-check] x', origin: { kind: 'plugin', name: 'self-compact' }, wait: false } as never)
+  expect(line()).not.toContain('code/commit/PR: English')
+  await $.prompt.submit({ text: '/help', command: { name: 'help' }, origin: { kind: 'composer' }, wait: false } as never)
+  expect(line()).not.toContain('code/commit/PR: English')
+  for (let i = 1; i <= 3; i++) {
+    await userPrompt($, `message ${i}`)
+    expect(line()).toContain('code/commit/PR: English')
+    expect(w.submits.at(-1)?.text).toBe(`message ${i}`)
+  }
+  await userPrompt($, 'message 4')
+  expect(w.submits.at(-1)?.context ?? []).toEqual([])
+})
+
+test('language: no rule line before any compaction', async ($, on) => {
+  const w = engine(on, { tokens: 50_000, window: 1_000_000 })
+  await start($)
+  await userPrompt($, 'hello')
+  expect(w.submits.at(-1)?.context).toBeUndefined()
+})
+
+test('language: a second compaction without language inherits the first rules', async ($, on) => {
+  const w = await compacted($, on)
+  w.usage.tokens = 200_000
+  await turnStart($, 't2')
+  await call($, HANDOFF)
+  await turnComplete($, 't2')
+  await w.clock.advance(1_500)
+  const queuedLines = w.log().filter(l => l.result === 'queued')
+  expect(queuedLines.map(l => (l as { langSource?: string }).langSource)).toEqual(['tool', 'inherited'])
+  expect(w.compactCalls[1]).toContain('personal spec: Chinese')
+  expect(w.submits[1].text.split('\n')[0]).toContain('code/commit/PR: English')
+  // A partial update changes only that sub-field.
+  w.usage.tokens = 200_000
+  await turnStart($, 't3')
+  await call($, langHandoff({ chat: '', outputs: ['code: Rust'] }))
+  await turnComplete($, 't3')
+  await w.clock.advance(1_500)
+  expect(w.submits[2].text.split('\n')[0]).toBe('Chat: Chinese, English terms/identifiers OK | code: Rust')
+})
+
+test('language: rules do not leak into a new conversation', async ($, on) => {
+  const w = await compacted($, on)
+  await $.session.end({ sessionId: 'sess1' } as never)
+  await start($)
+  await userPrompt($, 'hello')
+  expect(w.submits.at(-1)?.context).toBeUndefined()
+  w.usage.tokens = 200_000
+  await call($, HANDOFF)
+  expect(w.log().filter(l => l.result === 'queued').map(l => (l as { langSource?: string }).langSource)).toEqual(['tool', 'detected'])
+})
+
+test('language: lang-drift is logged once when the first reply after compaction mismatches', async ($, on) => {
+  const w = await compacted($, on, LANG_ZH)
+  const drifts = () => w.log().filter(l => l.result === 'lang-drift')
+  await turnStart($, 't2')
+  // Tool-only turn: no text yet, keep waiting.
+  await turnComplete($, 't2', false, '')
+  expect(drifts().length).toBe(0)
+  await turnStart($, 't3')
+  await turnComplete($, 't3', false, 'Continuing with the next step now.')
+  expect(drifts().length).toBe(1)
+  await turnStart($, 't4')
+  await turnComplete($, 't4', false, 'Another English reply.')
+  expect(drifts().length).toBe(1)
+})
+
+test('language: no lang-drift when the first reply matches the chat language', async ($, on) => {
+  const w = await compacted($, on, LANG_ZH)
+  await turnStart($, 't2')
+  await turnComplete($, 't2', false, '好的，继续做下一步。')
+  await turnStart($, 't3')
+  await turnComplete($, 't3', false, 'English later.')
+  expect(w.log().filter(l => l.result === 'lang-drift').length).toBe(0)
+})
+
+test('language: an English chat with an English reply is no drift; a Chinese reply is', async ($, on) => {
+  const w = await compacted($, on, { chat: 'English', outputs: [] })
+  await turnStart($, 't2')
+  await turnComplete($, 't2', false, '好的，继续做下一步。')
+  expect(w.log().filter(l => l.result === 'lang-drift').length).toBe(1)
 })
