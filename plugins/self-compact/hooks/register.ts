@@ -848,6 +848,73 @@ async function dataRoot($: Dollar): Promise<string | undefined> {
   return home === undefined || home === '' ? undefined : `${home.replace(/[\\/]$/, '')}/.claude/self-compact`
 }
 
+// ---- profile ----
+
+export type PEst = { p: number; n: number; out?: { dir: 1 | -1; samples: number[] } }
+export type SkillPrior = { stubbed: number; reloadedAfterStub: number; hot: number; usedAfterHot: number }
+export type Profile = { global?: PEst; byProject: Record<string, PEst>; skills?: Record<string, SkillPrior> }
+
+const OUTLIER_FRAC = 0.5
+const OUTLIER_RESET = 3
+
+/** Folds one post-compact size into the estimate: EWMA 0.3, outliers at 0.1; three same-direction outliers re-seed it. */
+export function learnP(est: PEst | undefined, sample: number): PEst {
+  if (est === undefined) return { p: sample, n: 1 }
+  const dev = sample - est.p
+  if (Math.abs(dev) <= OUTLIER_FRAC * est.p) {
+    return { p: Math.round(est.p + 0.3 * dev), n: est.n + 1 }
+  }
+  const dir: 1 | -1 = dev > 0 ? 1 : -1
+  const samples = est.out?.dir === dir ? [...est.out.samples, sample] : [sample]
+  if (samples.length >= OUTLIER_RESET) {
+    return { p: Math.round(samples.reduce((a, b) => a + b, 0) / samples.length), n: samples.length }
+  }
+  return { p: Math.round(est.p + 0.1 * dev), n: est.n + 1, out: { dir, samples } }
+}
+
+const MIN_N = 3
+
+/** Post-compact size to plan with: this session's sample, else the project's, else the global, else baseline + 25k. */
+export function pickP(profile: Profile, cwd: string, sessionSample: number | undefined, baseline: number | undefined): number {
+  if (sessionSample !== undefined) return sessionSample
+  const proj = profile.byProject[cwd]
+  if (proj !== undefined && proj.n >= MIN_N) return proj.p
+  if (profile.global !== undefined && profile.global.n >= MIN_N) return profile.global.p
+  return (baseline ?? DEFAULT_BASELINE) + 25_000
+}
+
+export function parseProfile(text: string | undefined): Profile {
+  try {
+    const o = JSON.parse(text ?? '') as unknown
+    if (typeof o !== 'object' || o === null || Array.isArray(o)) return { byProject: {} }
+    const r = o as Partial<Profile>
+    const byProject = typeof r.byProject === 'object' && r.byProject !== null && !Array.isArray(r.byProject) ? r.byProject : {}
+    return { ...r, byProject }
+  } catch {
+    return { byProject: {} }
+  }
+}
+
+/** Re-reads profile.json, applies `mutate`, writes it back; queued behind log writes, never throws. An unreadable file is left alone. */
+export function saveProfile($: Dollar, mutate: (p: Profile) => void): Promise<void> {
+  const run = async (): Promise<void> => {
+    try {
+      const home = await dataRoot($)
+      if (home === undefined) return
+      const path = `${home}/profile.json`
+      const prev = (await $.fs.exists(path)) ? await $.fs.read(path) : undefined
+      if (prev !== undefined && typeof prev !== 'string') return
+      const profile = parseProfile(prev)
+      mutate(profile)
+      await $.fs.write(path, JSON.stringify(profile))
+    } catch {
+      // Learning is best effort.
+    }
+  }
+  logTail = logTail.then(run, run)
+  return logTail
+}
+
 /** The session's opening request, saved on first sight: after a compaction the transcript the engine returns no longer starts with it. */
 async function sessionIntent($: Dollar, path: string, msgs: readonly { role: string; text: string }[]): Promise<string | undefined> {
   try {

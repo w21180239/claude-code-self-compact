@@ -3,6 +3,10 @@ import type { TestBody } from 'claude-code/testing'
 import {
   DEFAULTS,
   callsToTokens,
+  learnP,
+  pickP,
+  parseProfile,
+  saveProfile,
   deprecatedKeys,
   thresholds,
   buildInstructions,
@@ -18,7 +22,7 @@ import {
   TOOL_FULL,
   validateHandoff,
 } from '../hooks/register'
-import type { Handoff } from '../hooks/register'
+import type { Handoff, PEst } from '../hooks/register'
 
 test('gate: below the call-count floor denies, at it opens', () => {
   // Interim P = 90k: C(20) = (1.05M + 20*90k) / 19 = 150k.
@@ -1587,4 +1591,78 @@ testZh('nudge text (zh): says the gate passed and compaction does not stop the t
   expect(t).toContain('插件已确认现在压缩划算')
   expect(t).toContain('不用再判断大小')
   expect(t).toContain('压缩不会打断任务')
+})
+
+test('learnP: first sample seeds, then EWMA 0.3', () => {
+  const a = learnP(undefined, 80_000)
+  expect(a).toEqual({ p: 80_000, n: 1 })
+  expect(learnP(a, 90_000).p).toBe(83_000)
+})
+
+test('learnP: an outlier moves the estimate at 0.1', () => {
+  expect(learnP({ p: 80_000, n: 5 }, 200_000).p).toBe(92_000)
+})
+
+test('learnP: three same-direction outliers reset', () => {
+  let e: PEst = { p: 80_000, n: 9 }
+  for (const s of [150_000, 160_000, 170_000]) e = learnP(e, s)
+  expect(e.p).toBe(160_000)
+  expect(e.n).toBe(3)
+  expect(e.out).toBeUndefined()
+})
+
+test('learnP: a normal sample or a direction change clears the outlier run', () => {
+  let e: PEst = learnP({ p: 80_000, n: 9 }, 150_000)
+  e = learnP(e, 160_000)
+  expect(e.out?.samples.length).toBe(2)
+  expect(learnP(e, e.p).out).toBeUndefined()
+  expect(learnP(e, 10_000).out).toEqual({ dir: -1, samples: [10_000] })
+})
+
+test('pickP: session sample > project n>=3 > global n>=3 > baseline+25k', () => {
+  const prof = { global: { p: 70_000, n: 3 }, byProject: { '/a': { p: 90_000, n: 3 }, '/b': { p: 50_000, n: 2 } } }
+  expect(pickP(prof, '/a', 99_000, 60_000)).toBe(99_000)
+  expect(pickP(prof, '/a', undefined, 60_000)).toBe(90_000)
+  expect(pickP(prof, '/b', undefined, 60_000)).toBe(70_000)
+  expect(pickP({ byProject: {} }, '/b', undefined, undefined)).toBe(90_000)
+  expect(pickP({ byProject: {} }, '/b', undefined, 60_000)).toBe(85_000)
+})
+
+test('profile: corrupt json reads as empty', () => {
+  expect(parseProfile('{oops')).toEqual({ byProject: {} })
+  expect(parseProfile('[1]')).toEqual({ byProject: {} })
+  expect(parseProfile(undefined)).toEqual({ byProject: {} })
+})
+
+// saveProfile only touches env and fs; shim them over the engine fixture.
+const mod = (w: ReturnType<typeof engine>) =>
+  ({
+    env: { get: async (k: string) => (k === 'HOME' ? '/home/u' : undefined) },
+    fs: {
+      exists: async (p: string) => w.files.has(p),
+      read: async (p: string) => { if (w.fsFlags.failRead) throw new Error('EIO'); return w.files.get(p) as string },
+      write: async (p: string, t: string) => void w.files.set(p, t),
+    },
+  }) as never
+
+testZh('profile: merge keeps other project', async ($, on) => {
+  const w = engine(on)
+  w.files.set(`${ROOT}/profile.json`, JSON.stringify({ byProject: { '/other': { p: 70_000, n: 4 } } }))
+  await saveProfile(mod(w), (p) => {
+    p.byProject['/proj'] = learnP(p.byProject['/proj'], 80_000)
+  })
+  const saved = JSON.parse(w.files.get(`${ROOT}/profile.json`) as string)
+  expect(saved.byProject['/other']).toEqual({ p: 70_000, n: 4 })
+  expect(saved.byProject['/proj']).toEqual({ p: 80_000, n: 1 })
+})
+
+testZh('profile: unreadable file is left alone and never throws', async ($, on) => {
+  const w = engine(on)
+  w.files.set(`${ROOT}/profile.json`, '{keep')
+  w.fsFlags.failRead = true
+  await saveProfile(mod(w), (p) => {
+    p.global = { p: 1, n: 1 }
+  })
+  w.fsFlags.failRead = false
+  expect(w.files.get(`${ROOT}/profile.json`)).toBe('{keep')
 })
