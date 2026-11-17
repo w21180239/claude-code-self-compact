@@ -1171,13 +1171,13 @@ async function registerTool($: Dollar): Promise<void> {
     // No usage reading yet: describe the tiers against the reference window.
   }
   const t = currentThresholds(window)
-  state.describedP = t.p
   await $.tool.register({
     name: TOOL,
     description: S().description(state.cfg, t),
     inputSchema: inputSchema(S()),
     isDeferred: false,
   })
+  state.describedP = t.p
 }
 
 /** Folds the first main step after a compaction into the profile and the session's P. */
@@ -1192,12 +1192,15 @@ async function learnSample($: Dollar, total: number): Promise<void> {
   fold(state.profile)
   await saveProfile($, fold)
   await logLine($, { result: 'p-sample', pSample: total, p: pickP(state.profile, cwd ?? '', state.sessionP, state.baseline) })
-  if (currentThresholds(REF_WINDOW).p !== state.describedP) {
-    try {
-      await registerTool($)
-    } catch {
-      // A stale description must not cost this step its nudge.
-    }
+}
+
+/** Re-registers when the description lags P; a failure is retried on the next step. */
+async function resyncTool($: Dollar): Promise<void> {
+  if (currentThresholds(REF_WINDOW).p === state.describedP) return
+  try {
+    await registerTool($)
+  } catch {
+    // A stale description must not cost this step its nudge.
   }
 }
 
@@ -1208,6 +1211,7 @@ async function onMainStep($: Dollar, u: StepUsage, messageCount: number): Promis
   state.lastStepTokens = total
   if (state.baseline === undefined && messageCount <= BASELINE_MAX_MESSAGES) state.baseline = total
   if (state.awaitingPSample) await learnSample($, total)
+  await resyncTool($)
   if (!state.interactive || !state.cfg.enabled || (await $.env.get('DISABLE_COMPACT')) === '1') return
   if (state.pending !== undefined || state.compacting) return
   const window = (await usageOf($)).window

@@ -1865,3 +1865,16 @@ testZh('pSample: a failing re-registration still yields that step\'s nudge', asy
   expect(w.log().some(l => l.result === 'p-sample')).toBe(true)
   expect(await ctxOf($)).toContain('下一个安全步骤')
 })
+
+test('pSample: a failed re-registration is retried on the next step', async ($, on) => {
+  const w = engine(on, { tokens: 100_000, window: 1_000_000 })
+  await start($)
+  await modelStep($, w, 65_000)
+  await $.session.compact({ instructions: 'x', messages: [{ role: 'user', text: 's', toolUses: [] }] } as never)
+  w.fail.register = true
+  await modelStep($, w, 120_000)
+  const before = w.registered.length
+  w.fail.register = false
+  await modelStep($, w, 121_000)
+  expect(w.registered.length).toBe(before + 1)
+})
