@@ -132,7 +132,17 @@ The plugin renders the handoff as markdown, adds the session's original request 
 
 The original request is the first real user message, capped at 1,500 characters and saved to `<session-id>/intent.md` on the first `compact_now`. Later calls read the saved copy, because after a compaction the transcript the engine returns starts with the summary, and each generation of summary would paraphrase the intent a little further. It is left out when it is still one of the last five messages.
 
-Instructions are capped at 8,000 characters. Trimming order: `done`, then the oldest user messages, then `drop`, `lessons`, the original request, `decisions` and `artifacts` (from the end). `standing_orders`, `pending` and `next` are never trimmed.
+Instructions are capped at 8,000 characters. Trimming order: `done`, then the oldest user messages, then `drop`, `lessons`, the original request, `decisions` and `artifacts` (from the end). `standing_orders`, `pending`, `next` and the language rules are never trimmed.
+
+## Language rules
+
+A user who chats in one language and wants code, commits, PRs, specs and outgoing text in others loses that split at compaction: the summary is written in English and the rule is one bullet among many. `compact_now` therefore takes a `language` field, `{ chat, outputs[] }`, required in the schema and optional in validation (a malformed value counts as absent, a missing one never blocks).
+
+`mergeLanguage(prev, given, detected)` resolves it per sub-field: a non-empty given value wins, then the previous compaction's, and `chat` finally falls back to `detectChatLang` over the last 5 real user messages (CJK characters >= 30% of the non-space text is `zh`, else `en`; empty input is undefined), rendered as the language's name in the configured UI language. `source` records where `chat` came from (`tool`, `inherited`, `detected`, `none`) and is logged as `langSource` on `queued` and `done`. Plugin-submitted prompts (resume message, self-check, nudges) are excluded from detection and from the "recent messages" list; the resume message is recognised even with the language line in front of it. The merged rules live in session state and survive every compaction; `resetConversation` clears them with the other per-conversation state (new session, `/clear`, `/resume`).
+
+Four carriers keep the rules alive: the handoff file (first section, "Language rules"); the compact instructions (a line telling the summarizer to write in the chat language with that section first and each output rule copied verbatim, never trimmed by the 8,000-character cap); the first line of the continuation prompt; and, for the first 3 real user prompts after a compaction (composer or bridge origin, not commands, not plugin prompts), one short rule line in the prompt's context.
+
+Drift check: after a compaction the first non-empty main assistant answer (`turn.complete.answer`, the final visible text of the turn) is classified with the same CJK rule; when it differs from the chat language's class (the first of Chinese or English named in the chat rule) one `lang-drift` row with `expected` and `got` is logged, once per compaction. A tool-only turn has an empty answer and is skipped until text appears.
 
 ## Races
 
@@ -184,7 +194,7 @@ Every successful compaction ends with the continuation prompt, whether it was re
 
 Past about 2 MB, `log.jsonl` is moved to `log.1.jsonl` and a new file starts. A log that cannot be read is left untouched rather than overwritten.
 
-`log.jsonl` has one JSON line per request: `ts`, `session`, `node`, `pct` (usage at request), `result` (`queued`, `denied:<why>`, `done`, `preempted`, `aborted`, `stale`, `failed`, `error`, `p-sample`, `deprecated`, `tool-describe`, `self-check`, `self-check:compacted`, `self-check:declined`), an optional `reason` (on `self-check:declined`, the model's skip reason, at most 200 characters), optional `pSample` and `p`, `beforePct`, `afterPct` and `durationMs`.
+`log.jsonl` has one JSON line per request: `ts`, `session`, `node`, `pct` (usage at request), `result` (`queued`, `denied:<why>`, `done`, `preempted`, `aborted`, `stale`, `failed`, `error`, `p-sample`, `deprecated`, `tool-describe`, `self-check`, `self-check:compacted`, `self-check:declined`, `lang-drift`), an optional `reason` (on `self-check:declined`, the model's skip reason, at most 200 characters), optional `pSample` and `p`, `langSource` (`queued`, `done`), `expected` and `got` (`lang-drift`), `beforePct`, `afterPct` and `durationMs`.
 
 ## Language
 

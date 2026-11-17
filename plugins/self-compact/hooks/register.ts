@@ -77,6 +77,13 @@ type Strings = {
   hDone: string
   hNext: string
   hDropped: string
+  hLanguage: string
+  langChatLabel: string
+  langSep: string
+  langName: Record<'zh' | 'en', string>
+  langInstruction: (chat: string | undefined) => string
+  langReinforce: (line: string) => string
+  language: string
   hLessons: string
   hIntent: string
   hRecent: string
@@ -195,6 +202,16 @@ export const STRINGS: Record<Lang, Strings> = {
     hDone: 'Done',
     hNext: 'Next step',
     hDropped: 'Dropped threads',
+    hLanguage: 'Language rules',
+    langChatLabel: 'Chat: ',
+    langSep: ' | ',
+    langName: { zh: 'Chinese', en: 'English' },
+    langInstruction: chat =>
+      chat === undefined
+        ? "The summary's first section is 'Language rules', copying each rule verbatim."
+        : `Language: write the summary in ${chat}; its first section is 'Language rules', copying each outputs rule verbatim.`,
+    langReinforce: line => `[self-compact] Language rules still apply: ${line}`,
+    language: 'Fill in the language rules this session actually uses, not global defaults: chat = the conversation language as the user set it, outputs = one rule per channel (code, commit, PR, spec, outgoing text) in the user\'s words.',
     hLessons: 'Lessons from dead ends',
     hIntent: 'Original request',
     hRecent: 'Recent user messages',
@@ -305,6 +322,16 @@ After "Queued", end the turn now: one line, call no more tools.
     hDone: '已完成',
     hNext: '下一步',
     hDropped: '丢弃的支线',
+    hLanguage: '语言约定',
+    langChatLabel: '对话：',
+    langSep: '｜',
+    langName: { zh: '中文', en: '英文' },
+    langInstruction: chat =>
+      chat === undefined
+        ? '摘要的第一节是「语言约定」，各条规则原样照抄。'
+        : `用「${chat}」写摘要；摘要的第一节是「语言约定」，outputs 各条规则原样照抄。`,
+    langReinforce: line => `[self-compact] 语言约定仍然有效：${line}`,
+    language: '填本会话实际在用的语言约定，不是全局默认：chat 写用户设定的对话语言，outputs 每个渠道（代码、commit、PR、spec、对外文字）一条，用用户的原话。',
     hLessons: '走不通的路及教训',
     hIntent: '用户最初的需求',
     hRecent: '用户最近原话',
@@ -491,6 +518,9 @@ export function configFrom(options: Record<string, unknown> | undefined): Config
 
 // ---- Handoff ----
 
+/** Per-channel language rules: `chat` is the conversation language, each `outputs` entry one rule in the user's words. */
+export type LangRules = { chat: string; outputs: string[] }
+
 export type Handoff = {
   node: string
   objective: string
@@ -502,12 +532,21 @@ export type Handoff = {
   next: string
   drop?: string[]
   lessons?: string[]
+  language?: LangRules
 }
 
 const isText = (v: unknown): v is string => typeof v === 'string' && v.trim() !== ''
 const isTexts = (v: unknown): v is string[] => Array.isArray(v) && v.every(isText)
 
 export type HandoffCheck = { ok: true; h: Handoff } | { ok: false; missing: string[] }
+
+/** A malformed `language` counts as absent; it never blocks a compaction. */
+function parseLanguage(v: unknown): LangRules | undefined {
+  if (typeof v !== 'object' || v === null) return undefined
+  const o = v as Record<string, unknown>
+  if (typeof o.chat !== 'string' || !Array.isArray(o.outputs) || !o.outputs.every(x => typeof x === 'string')) return undefined
+  return { chat: o.chat.trim(), outputs: (o.outputs as string[]).map(s => s.trim()).filter(s => s !== '') }
+}
 
 /** `standing_orders` and `pending` may be empty arrays; every other field but `drop` and `lessons` is required. */
 export function validateHandoff(x: unknown): HandoffCheck {
@@ -532,6 +571,8 @@ export function validateHandoff(x: unknown): HandoffCheck {
   }
   if (o.drop !== undefined) h.drop = o.drop as string[]
   if (o.lessons !== undefined) h.lessons = o.lessons as string[]
+  const language = parseLanguage(o.language)
+  if (language !== undefined) h.language = language
   return { ok: true, h }
 }
 
@@ -544,10 +585,26 @@ function fenced(text: string): string {
   return `${fence}\n${text}\n${fence}`
 }
 
+const hasLang = (l: LangRules | undefined): l is LangRules => l !== undefined && (l.chat !== '' || l.outputs.length > 0)
+
+function langBullets(l: LangRules | undefined, lang: Lang): string[] {
+  if (!hasLang(l)) return []
+  return [...(l.chat !== '' ? [`${STRINGS[lang].langChatLabel}${l.chat}`] : []), ...l.outputs]
+}
+
+/** One line: the chat language, then each output rule; the first line of the resume message. */
+export function langLine(l: LangRules | undefined, lang: Lang): string | undefined {
+  const parts = langBullets(l, lang).map(s => s.replace(/\s+/g, ' '))
+  return parts.length === 0 ? undefined : parts.join(STRINGS[lang].langSep)
+}
+
 export function renderHandoff(h: Handoff, userMsgs: readonly string[], lang: Lang = 'en', intent?: string): string {
   const t = STRINGS[lang]
   const sec = (title: string): string => `## ${title}`
-  const out = [t.hTitle(h.node), sec(t.hObjective), h.objective]
+  const out = [t.hTitle(h.node)]
+  const rules = langBullets(h.language, lang)
+  if (rules.length > 0) out.push(sec(t.hLanguage), bullets(rules))
+  out.push(sec(t.hObjective), h.objective)
   // Skipped when the opening request is still among the recent messages.
   if (intent !== undefined && !userMsgs.includes(intent)) out.push(sec(t.hIntent), fenced(intent))
   out.push(sec(t.hStanding), h.standing_orders.length > 0 ? bullets(h.standing_orders) : t.none)
@@ -571,19 +628,73 @@ const NOT_REAL_USER = [
   '<system-reminder',
   '<task-notification',
   'Caveat:',
+  // Everything the plugin submits itself: self-check, nudges.
+  '[self-compact',
   '[Request interrupted',
   'This session is being continued',
   // Our own continuation prompt (see continuationText).
   ...Object.values(STRINGS).map(t => t.contMarker),
 ]
 
-const isRealUser = (m: { role: string; text: string }): boolean =>
-  m.role === 'user' && m.text.trim() !== '' && !NOT_REAL_USER.some(p => m.text.trimStart().startsWith(p))
+const startsInjected = (s: string): boolean => NOT_REAL_USER.some(p => s.trimStart().startsWith(p))
+
+/** Text the person typed: not a tool notice, our own prompt, or the resume message (whose first line may be the language line). */
+const isRealText = (text: string): boolean => {
+  if (text.trim() === '' || startsInjected(text)) return false
+  const i = text.indexOf('\n\n')
+  return !(i > 0 && startsInjected(text.slice(i + 2)))
+}
+
+const isRealUser = (m: { role: string; text: string }): boolean => m.role === 'user' && isRealText(m.text)
 
 /** The last `n` user messages typed by the person, oldest first. */
 export function realUserMessages(msgs: readonly { role: string; text: string }[], n = 5): string[] {
   const real = msgs.filter(isRealUser).map(m => m.text)
   return n > 0 ? real.slice(-n) : []
+}
+
+export type ChatLang = 'zh' | 'en'
+
+const CJK = /[\u3400-\u4dbf\u4e00-\u9fff\u3000-\u303f\uff00-\uffef]/g
+export const CJK_RATIO = 0.3
+
+/** 'zh' when CJK characters are at least CJK_RATIO of the non-space characters, else 'en'; undefined for empty text. */
+export function dominantLang(text: string): ChatLang | undefined {
+  const chars = text.replace(/\s/g, '')
+  if (chars === '') return undefined
+  return (chars.match(CJK)?.length ?? 0) / chars.length >= CJK_RATIO ? 'zh' : 'en'
+}
+
+/** Language of the person's last 5 typed messages; plugin-injected prompts do not count. */
+export function detectChatLang(msgs: readonly string[]): ChatLang | undefined {
+  return dominantLang(msgs.filter(isRealText).slice(-5).join(' '))
+}
+
+/** zh/en class of a free-text chat rule such as "Chinese, English terms OK": the first language named; undefined when none is. */
+export function chatClass(chat: string): ChatLang | undefined {
+  const zh = chat.search(/chinese|mandarin|cantonese|\u4e2d\u6587|\u6c49\u8bed|\u6f22\u8a9e|\u666e\u901a\u8bdd|\u56fd\u8bed|\u7ca4\u8bed/i)
+  const en = chat.search(/english|\u82f1\u6587|\u82f1\u8bed/i)
+  if (zh >= 0 && (en < 0 || zh < en)) return 'zh'
+  if (en >= 0) return 'en'
+  return dominantLang(chat) === 'zh' ? 'zh' : undefined
+}
+
+export type MergedLang = LangRules & { source: 'tool' | 'inherited' | 'detected' | 'none' }
+
+/** Per sub-field the given value wins, then the previous one; `chat` finally falls back to the detected language's name. */
+export function mergeLanguage(
+  prev: LangRules | undefined,
+  given: Partial<LangRules> | undefined,
+  detected: ChatLang | undefined,
+  lang: Lang = state.cfg.language,
+): MergedLang {
+  const gChat = given?.chat?.trim() ?? ''
+  const gOut = given?.outputs ?? []
+  const outputs = gOut.length > 0 ? gOut : (prev?.outputs ?? [])
+  if (gChat !== '') return { chat: gChat, outputs, source: 'tool' }
+  if (prev !== undefined && prev.chat !== '') return { chat: prev.chat, outputs, source: 'inherited' }
+  if (detected !== undefined) return { chat: STRINGS[lang].langName[detected], outputs, source: 'detected' }
+  return { chat: '', outputs, source: 'none' }
 }
 
 export const INTENT_CAP = 1_500
@@ -597,7 +708,7 @@ export function firstUserMessage(msgs: readonly { role: string; text: string }[]
 
 export const INSTRUCTIONS_CAP = 8_000
 
-/** Compact instructions within INSTRUCTIONS_CAP: drops `done`, then the oldest user messages, then (last resort) `drop`, `lessons`, the original request, `decisions`, `artifacts`. standing_orders, pending and next are never trimmed. */
+/** Compact instructions within INSTRUCTIONS_CAP: drops `done`, then the oldest user messages, then (last resort) `drop`, `lessons`, the original request, `decisions`, `artifacts`. standing_orders, pending, next and the language rules are never trimmed. */
 export function buildInstructions(
   h: Handoff,
   userMsgs: readonly string[],
@@ -606,8 +717,10 @@ export function buildInstructions(
   intent?: string,
 ): string {
   const t = STRINGS[lang]
+  // Never trimmed: it is what keeps the rules alive through the summariser.
+  const langInstruction = hasLang(h.language) ? `${t.langInstruction(h.language.chat === '' ? undefined : h.language.chat)}\n\n` : ''
   const build = (hh: Handoff, msgs: readonly string[], it: string | undefined): string =>
-    `${t.preamble}\n\n${renderHandoff(hh, msgs, lang, it)}\n\n${t.tail(handoffPath)}`
+    `${t.preamble}\n\n${langInstruction}${renderHandoff(hh, msgs, lang, it)}\n\n${t.tail(handoffPath)}`
   let cur: Handoff = h
   let msgs = [...userMsgs]
   let it = intent
@@ -631,12 +744,15 @@ export type Continuation = {
   standing_orders: string[]
   pending: string[]
   sessionId?: string
+  language?: LangRules
 }
 
 export function continuationText(p: Continuation, lang: Lang = 'en'): string {
   const t = STRINGS[lang]
   const after = p.afterPct === undefined ? t.contUnknown : `${p.afterPct}%`
+  const rules = langLine(p.language, lang)
   const lines = [
+    ...(rules !== undefined ? [rules] : []),
     t.contHead(p.node, p.beforePct, after, p.handoffPath),
     t.contNext(p.next ?? t.contNextFallback),
     `${t.contStanding}\n${p.standing_orders.length > 0 ? bullets(p.standing_orders) : t.none}`,
@@ -751,6 +867,7 @@ export type Pending = {
   turnId?: string
   toolCallsSince: number
   nextValid: boolean
+  langSource: string
 }
 
 type State = {
@@ -799,6 +916,12 @@ type State = {
   awaitingCheck: boolean
   checkTurn: boolean
   checkTimer?: Timer
+  // Language rules of the last compaction request: kept across compactions, cleared with the conversation.
+  lang?: LangRules
+  // Real user turns still owed the rule line after a compaction.
+  langTurns: number
+  // Chat language class the first assistant reply after a compaction is checked against.
+  driftExpect?: ChatLang
 }
 
 // One state per loaded module; a session start begins afresh.
@@ -825,6 +948,7 @@ export const state: State = {
   idleSinceCheck: false,
   awaitingCheck: false,
   checkTurn: false,
+  langTurns: 0,
 }
 
 const str = { type: 'string' }
@@ -844,8 +968,14 @@ function inputSchema(t: Strings) {
       next: { ...str, description: t.next },
       drop: { ...strs, description: t.drop },
       lessons: { ...strs, description: t.lessons },
+      language: {
+        type: 'object',
+        description: t.language,
+        properties: { chat: str, outputs: strs },
+        required: ['chat', 'outputs'],
+      },
     },
-    required: ['node', 'objective', 'standing_orders', 'decisions', 'artifacts', 'pending', 'done', 'next'],
+    required: ['node', 'objective', 'standing_orders', 'decisions', 'artifacts', 'pending', 'done', 'next', 'language'],
   }
 }
 
@@ -863,6 +993,9 @@ type LogLine = {
   kind?: string
   pSample?: number
   p?: number
+  langSource?: string
+  expected?: string
+  got?: string
 }
 
 // $.fs has no append: each write is read-modify-write, so writers queue behind one another.
@@ -1030,26 +1163,30 @@ async function handleCompact($: Dollar, input: Record<string, unknown>, isSub: b
   const all = Array.isArray(raw) ? raw : []
   const msgs = realUserMessages(all)
   const intent = await sessionIntent($, `${root}/${sid}/intent.md`, all)
+  const merged = mergeLanguage(state.lang, v.h.language, detectChatLang(msgs))
+  const h: Handoff = { ...v.h, language: hasLang(merged) ? { chat: merged.chat, outputs: merged.outputs } : undefined }
   try {
-    await $.fs.write(path, renderHandoff(v.h, msgs, state.cfg.language, intent))
+    await $.fs.write(path, renderHandoff(h, msgs, state.cfg.language, intent))
   } catch (err) {
     return deny(S().denyWriteFailed(String(err)), 'write-failed', node, g.pct)
   }
   state.seq = n
+  state.lang = h.language
   state.pending = {
-    h: v.h,
-    instructions: buildInstructions(v.h, msgs, path, state.cfg.language, intent),
+    h,
+    instructions: buildInstructions(h, msgs, path, state.cfg.language, intent),
     handoffPath: path,
     sessionId: sid,
     requestedPct: g.pct,
     toolCallsSince: 0,
     nextValid: true,
+    langSource: merged.source,
   }
   state.retries = 0
   state.waitingNextTurn = false
   state.finalTry = false
   $.ui.status(S().statusQueued(v.h.node))
-  await logLine($, { node: v.h.node, pct: g.pct, result: 'queued' })
+  await logLine($, { node: v.h.node, pct: g.pct, result: 'queued', langSource: merged.source })
   return { result: S().queued(g.pct) }
 }
 
@@ -1090,6 +1227,9 @@ async function dropPending($: Dollar, p: Pending, line: Omit<LogLine, 'node' | '
   await logLine($, { node: p.h.node, pct: p.requestedPct, ...line })
 }
 
+// Real user turns after a compaction that get the language rule line appended.
+export const LANG_REINFORCE_TURNS = 3
+
 function sendContinuation($: Dollar, p: Pending, beforePct: number, afterPct: number | undefined): void {
   const text = continuationText(
     {
@@ -1101,9 +1241,12 @@ function sendContinuation($: Dollar, p: Pending, beforePct: number, afterPct: nu
     standing_orders: p.h.standing_orders,
     pending: p.h.pending,
     sessionId: p.sessionId,
+    language: p.h.language,
     },
     state.cfg.language,
   )
+  state.langTurns = hasLang(p.h.language) ? LANG_REINFORCE_TURNS : 0
+  state.driftExpect = p.h.language !== undefined ? chatClass(p.h.language.chat) : undefined
   // Not awaited: submit resolves only once the next turn starts.
   void Promise.resolve($.prompt.submit({ text })).catch(() => {})
 }
@@ -1162,7 +1305,7 @@ async function runCompact($: Dollar): Promise<void> {
         ? pctOf({ tokens: tokensAfter, window: ctx.window })
         : pctOf((await $.session.usage()).context)
     const durationMs = (await $.clock.now()) - started
-    await dropPending($, p, { result: 'done', beforePct: before, afterPct: after, durationMs })
+    await dropPending($, p, { result: 'done', beforePct: before, afterPct: after, durationMs, langSource: p.langSource })
     state.lastNudgedTokens = undefined
     state.awaitingPSample = true
     // The old step total is stale; the result's count stands in until the next step.
@@ -1294,6 +1437,9 @@ function resetConversation(): void {
   state.retries = 0
   state.waitingNextTurn = false
   state.finalTry = false
+  state.lang = undefined
+  state.langTurns = 0
+  state.driftExpect = undefined
 }
 
 // ---- autonomous triggers: node nudge, turn-end self-check, topic switch ----
@@ -1450,6 +1596,12 @@ export const register: Register = (on, options) => {
         arm($, IDLE_DEBOUNCE_MS)
       }
     }
+    if (state.driftExpect !== undefined && !e.isAborted && !state.checkTurn && e.answer.trim() !== '') {
+      const expected = state.driftExpect
+      state.driftExpect = undefined
+      const got = dominantLang(e.answer)
+      if (got !== undefined && got !== expected) await logLine($, { result: 'lang-drift', expected, got })
+    }
     if (state.checkTurn) {
       state.checkTurn = false
       if (!e.isAborted) {
@@ -1477,6 +1629,11 @@ export const register: Register = (on, options) => {
     if (human) state.awaitingCheck = false
     if (e.command !== undefined) return next(e)
     const lines = hasNotes() ? takeNotes() : []
+    if (human && state.langTurns > 0) {
+      state.langTurns--
+      const line = langLine(state.lang, state.cfg.language)
+      if (line !== undefined) lines.push(S().langReinforce(line))
+    }
     if (human) {
       try {
         const hint = await topicHint($)

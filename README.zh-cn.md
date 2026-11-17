@@ -111,9 +111,11 @@ claude plugin install self-compact@claude-code-self-compact
 
 ## 交接单保留什么
 
-`compact_now` 接收结构化的交接单：`node`、`objective`、`standing_orders`（你的规则和授权，用你的原话）、`decisions`（含原因）、`artifacts`、`pending`（每个在跑的任务及回报方式）、`done`、`next`，以及可选的 `drop` 和 `lessons`（试过不行的做法及原因）。缺必填字段时调用被拒绝，并指出缺哪一项。
+`compact_now` 接收结构化的交接单：`node`、`objective`、`standing_orders`（你的规则和授权，用你的原话）、`decisions`（含原因）、`artifacts`、`pending`（每个在跑的任务及回报方式）、`done`、`next`、`language`（见下），以及可选的 `drop` 和 `lessons`（试过不行的做法及原因）。缺必填字段时调用被拒绝，并指出缺哪一项。
 
-插件把它渲染成 `handoff-<n>.md`，附上你最初的需求（每个会话只存一次，多次压缩也不会走样）和最近 5 条真实消息（过滤掉命令、系统提醒、任务通知），再作为压缩指令发出。前面的固定前言要求 summarizer 原样保留常驻规则、列全待处理项、以 `next` 收尾；带行号的路径、报错原文、数值和签名原样照抄；过时的日志、重复读取和走不通的路可以丢，但留下教训。指令总长上限 8,000 字符，超出时先截 `done`，再截你最早的消息；`standing_orders`、`pending`、`next` 永远不截。
+插件把它渲染成 `handoff-<n>.md`，附上你最初的需求（每个会话只存一次，多次压缩也不会走样）和最近 5 条真实消息（过滤掉命令、系统提醒、任务通知），再作为压缩指令发出。前面的固定前言要求 summarizer 原样保留常驻规则、列全待处理项、以 `next` 收尾；带行号的路径、报错原文、数值和签名原样照抄；过时的日志、重复读取和走不通的路可以丢，但留下教训。指令总长上限 8,000 字符，超出时先截 `done`，再截你最早的消息；`standing_orders`、`pending`、`next` 和语言约定永远不截。
+
+`language` 携带你按渠道区分的语言约定：`chat`（你设定的对话语言）和 `outputs`（每个渠道一条，用你的原话，如“代码/commit/PR：英文”）。schema 里它是必填项，但缺失永远不会阻止压缩。逐个字段取值：本次调用给的优先，其次是本会话上一次压缩继承下来的，最后（仅 `chat`）用你最近 5 条真实消息检测出的语言（CJK 字符占非空白字符 30% 以上记为中文，否则英文；插件自己发的提示不计入）。合并后的约定写在 `handoff-<n>.md` 最前面的“语言约定”小节；压缩指令要求 summarizer 用对话语言写摘要，并把每条规则原样抄进摘要的第一节；续接消息的第一行就是约定行（`对话：中文｜代码/commit/PR：英文｜…`）。压缩后的前 3 条真实用户提示，插件还会把这一行附在提示的上下文里；插件自己提交的提示和斜杠命令不计数。约定在多次压缩之间保留，随会话结束清除。
 
 压缩之后，同样的常驻规则和待处理项会再通过续接消息原文送回，不依赖 summarizer 怎么转述。Claude 也可以回读完整的交接文件；续接消息还会告诉它，需要压缩前的确切细节时去 grep 本会话的 transcript。
 
@@ -163,7 +165,7 @@ P 的来源：每次压缩后的第一个主轮请求是压后大小的真实测
 - `<session-id>/handoff-<n>.md`：渲染后的交接单，加上你最初的需求和最近 5 条真实消息。
 - `<session-id>/intent.md`：你在本会话的第一条消息，上限 1,500 字符。
 - `profile.json`：学到的压后大小 P，按项目（以 cwd 绝对路径为键）和全局各一份，附样本数。
-- `log.jsonl`：每次请求一行 JSON，字段有 `ts`、`session`、`node`、`pct`（请求时占比）、`result`（`queued`、`denied:<原因>`、`done`、`preempted`、`aborted`、`stale`、`failed`、`error`、`p-sample`、`deprecated`、`tool-describe`）、可选的 `reason`、`beforePct`、`afterPct`、`durationMs`、`pSample`（压后实测大小）、`p`（当时采用的 P）。
+- `log.jsonl`：每次请求一行 JSON，字段有 `ts`、`session`、`node`、`pct`（请求时占比）、`result`（`queued`、`denied:<原因>`、`done`、`preempted`、`aborted`、`stale`、`failed`、`error`、`p-sample`、`deprecated`、`tool-describe`、`lang-drift`）、可选的 `reason`、`langSource`（对话语言的来源：`tool`、`inherited`、`detected` 或 `none`；在 `queued` 和 `done` 上）、`expected` 和 `got`（在 `lang-drift` 上：对话语言类别和压缩后首条助手回复的类别）、`beforePct`、`afterPct`、`durationMs`、`pSample`（压后实测大小）、`p`（当时采用的 P）。
 
 数据不会离开你的机器。插件不发起网络请求，也没有依赖。压缩本身用的是 Claude Code 自带的 `$.session.compact`，所以摘要由你这次会话所用的同一个模型和账号生成。交接文件里是你在对话中的原话，想删随时可以删这个目录。
 
