@@ -44,42 +44,46 @@ Claude 判断到了节点
 
 ## 门槛
 
-两个条件同时满足插件才放行：
+`tokens < floor` 时插件拒绝调用。各档都由 P（学到的压后大小）和下文成本模型的回本公式推出：
 
-1. `tokens >= floorPct% x window`
-2. `tokens >= baseline + 20k + minSavingK x 1k`。`baseline` 是本会话首个主轮请求的上下文大小，仅当对话不超过 3 条消息时采用，避免恢复的会话把它撑大（拿不到时 65k），20k 是摘要和重新注入文件的余量，`minSavingK` 是压缩后至少要腾出的 token 数。
+- floor = `max(C(floorCalls), floorPct x window)`，默认 `floorCalls` 20、`floorPct` 0
+- node = `C(nodeCalls)`，`nodeCalls` 10
+- work = `C(workCalls)`，`workCalls` 8
+- urgent = `min(urgentK x 1k, 0.8 x window)`，`urgentK` 350
 
-两者合成一个阈值：`need = max(floorPct x window, baseline + 20k + minSavingK x 1k)`。
+floor、node、work 都被 urgent 截顶，所以小窗口里各档向紧急档收拢，工具仍能打开。低于下限拒绝；下限到节点档只放行大阶段交接；节点档起任何干净节点都可压；紧急档起提醒要求在下一个安全步骤压。
 
 `tokens` 取引擎对本会话上下文的读数（`$.session.usage()`），即最新一条 assistant 消息上的 usage。Anthropic API 在流开头的 `message_start` 事件里就给出输入 token 数；部分 Anthropic 兼容网关在那里给 0，真实数字只放在结尾的 `message_delta` 里，经 OpenCode Go 接入的 DeepSeek 就是如此。引擎收到 `message_delta` 时会把修正后的 usage 写回，所以 transcript 和之后的轮次都正确；但响应仍在流式输出时发起的工具调用读到的是全 0 的快照，引擎因此不给 tokens。这时门槛退回用最近一次主轮请求的 usage 总量，插件本来就在每个 `turn.step` 读这份数据。这个总量比实时上下文落后一次请求（它的输出和工具结果），所以兜底只会偏向拒绝。usage 全为 0 的 step 不更新兜底值。主会话的任何压缩（插件自己的、auto-compact、`/compact`）都会把兜底值换成压缩结果报告的大小，没有报告就清空；会话边界也会清空，避免压缩前的旧尺寸混过门槛。
 
-默认值、基线 65k 时，`need = 125k`。1M 窗口下是 12.5%，与 10% 的下限相差 2.5 个百分点；200k 窗口下是 62.5%，小窗口不再被彻底关死（0.2.0 的 55% 压后比例在那里要求填到 77%）。
-
-改成绝对节省量的原因：压缩后实际剩余约 21k（作者历史 83 次压缩的 `postTokens` 中位数），压缩腾出的是 `tokens - 21k`，腾出的量要够付摘要的钱。用 token 表述，规则在任何窗口大小下含义一致；按窗口占比表述做不到这一点。
-
 ### 成本模型
 
-相对输入单价：cache read 0.1 倍、1 小时 cache write 2 倍、output 5 倍。一次压缩约 `0.1 x C + 105k` 输入当量，`C` 是上下文大小，105k 是生成摘要加重新缓存的保守固定估计。之后每次调用节省 `0.1 x (C - 20k)`，20k 是压缩后剩余量的实测中位数。
+相对输入单价：cache read 0.1 倍、1 小时 cache write 2 倍、output 5 倍。一次压缩约 `10 x F`（cache read 当量 tokens），`F` 即 `compactCostK`（默认 105k，生成摘要加重新缓存的保守固定估计）。不压缩则之后每次调用多花 `0.1 x (C - P)`，`C` 是当前上下文，`P` 是压后大小。`N` 次调用内回本的条件是 `N x 0.1 x (C - P) >= 10 x F`：
 
-| 压缩前 | 压缩成本 | 每次调用节省 | 回本 |
+`C(N) = (10 x F + N x P) / (N - 1)`
+
+| P | C(8) | C(10) | C(20) |
 | --- | --- | --- | --- |
-| 100k | 115k | 8k | 约 14 次 |
-| 150k | 120k | 13k | 约 9 次 |
-| 200k | 125k | 18k | 约 7 次 |
+| 65k | 224k | 189k | 124k |
+| 87k | 249k | 213k | 147k |
+| 120k | 287k | 250k | 182k |
 
-在测量的环境里，一次压缩 30-55 秒。模型是估计值，`log.jsonl` 记录压缩前后占比，可以用自己的会话核对。
+**学习 P。** 每次压缩后的第一个主轮请求测得真实压后大小（`log.jsonl` 的 `pSample`；`afterPct` 是压缩上报的摘要大小，不是下一个请求的大小）。`~/.claude/self-compact/profile.json` 按项目和全局各存一份指数加权平均（alpha 0.3）。与均值相差超过 50% 的样本是离群点，以 alpha 0.1 更新；同方向连续 3 个离群点把均值重置为它们的平均（n = 3）。n >= 3 才被信任。回退顺序：本会话样本、项目估计、全局估计、会话基线 + 25k（基线未知取 65k，即 90k）。P 变化时重新注册工具描述，Claude 看到的分层以 tokens 表示。
+
+**重型环境。** 截顶前 `C(workCalls)` 不低于 `urgentK` 时，说明环境（MCP、skill）很重，压缩收益很小。插件每个会话提示 Claude 一次，建议精简 MCP 服务或 skill。
+
+在测量的环境里，一次压缩 30-55 秒。模型是估计值，`log.jsonl` 记录各项大小，可以用自己的会话核对。
 
 ## 分层
 
-| 占比 | 行为 |
+| 大小 | 行为 |
 | --- | --- |
-| 低于下限 | 插件拒绝 |
-| 10-15% | 只在大阶段交接时压，且下一阶段明显够长 |
-| 15% 及以上 | 任何干净节点 |
-| 20% 及以上 | 开始提醒，之后每涨 5% 一次 |
-| 35% 及以上 | 提醒措辞升级：在下一个安全步骤压 |
+| 低于下限 `C(floorCalls)` | 插件拒绝 |
+| 下限到节点档 `C(nodeCalls)` | 只在大阶段交接时压，且下一阶段明显够长 |
+| 节点档及以上 | 任何干净节点 |
+| 节点档及以上，之后每涨 `nudgeStepPct` | 提醒 |
+| 紧急档及以上 | 提醒措辞升级：在下一个安全步骤压 |
 
-分层写在工具描述里，Claude 每轮都看得到。只有下限由机制强制。提醒起点取 `max(nudgeStartPct, floorPct)`，避免在下限以下提醒。
+分层写在工具描述里，Claude 每轮都看得到。只有下限由机制强制。提醒起点取 `max(node, floor)`，避免在下限以下提醒。
 
 ## 节点与反节点
 
@@ -143,7 +147,7 @@ Claude 判断到了节点
 
 ## 提醒
 
-主会话每一步读用量。用量越过提醒起点后，每再涨 `nudgeStepPct` 提醒一次：一行带当前占比的话，附在下一个文本工具结果上，若先来的是 prompt，则附在该 prompt 的上下文里。越过 `urgentPct` 立即升级。有请求排队或正在压缩时、subagent 中、非交互会话中、插件关闭时都不提醒。漏掉提醒可以接受：35% 以上仍有 auto-compact 兜底。
+主会话每一步读用量。用量越过提醒起点后，每再涨 `nudgeStepPct` 提醒一次：一行带当前占比的话，附在下一个文本工具结果上，若先来的是 prompt，则附在该 prompt 的上下文里。越过紧急档立即升级。有请求排队或正在压缩时、subagent 中、非交互会话中、插件关闭时都不提醒。漏掉提醒可以接受：紧急档以上仍有 auto-compact 兜底。
 
 ## 自主触发
 
@@ -151,9 +155,9 @@ Claude 判断到了节点
 
 **节点信号。** `detectNode(tool, input, result)` 是纯函数，输入是主会话里一次已完成且无错误的工具调用。强信号：`git push`、`git merge`、PR/MR 创建、评审、评论、关闭或合并、`gh issue comment`/`close`、`git tag`、通过 `gog`、`agent-slack`、`slack`、`outlook` 对外发消息（`send`、`reply`、`post`）、写入 `specs/` 或 `plans/` 下的 markdown、写入名为 `HANDOFF*`/`handoff*` 的文件、待办全部完成。弱信号：`git commit`、测试通过（`npm/pnpm/yarn/bun test`、`pytest`、`go test`、`cargo test`、`dotnet test`、`mvn`、`gradle`、`make test`/`check`）、新建 `.md`、后台 agent 启动、前台子代理返回。
 
-**回合中标记。** 门槛通过、无排队请求，且信号为强或上下文不低于 `floorPct + 5` 时，在该工具的文本结果上附一行（否则附在下一个 prompt 的上下文里）：点明节点、给出上下文占比，并告诉 Claude 若阶段已收尾且没有在等用户回答，就在本轮结束前调用 `compact_now`。每回合一条。
+**回合中标记。** 门槛通过、无排队请求，且信号为强，或信号为弱且上下文不低于节点档时，在该工具的文本结果上附一行（否则附在下一个 prompt 的上下文里）：点明节点、给出上下文占比，并告诉 Claude 若阶段已收尾且没有在等用户回答，就在本轮结束前调用 `compact_now`。每回合一条。
 
-**回合末自检。** 让整个流程全自动的兜底。主会话 `turn.complete` 时（未中止、交互式、门槛通过、无排队请求），按顺序检查：本轮是否出现节点信号；这一轮是否做了实活（主会话至少 `WORK_TURN_MIN_CALLS = 2` 次工具调用）且上下文不低于 `nudgeStartPct - 5`；或上下文已到 `nudgeStartPct` 以上仍未压缩。只有 `AskUserQuestion` 会抑制自检，末尾问号不会：收尾总结常常带问句，历史里的压缩正落在这些点上。每个触发点每涨 5 个百分点最多自检一次，两次自检之间没有工具活动则不连续自检。经过常规 1.5 秒防抖并空闲后，插件提交一条 prompt：阶段已收尾就调用 `compact_now`（若之后没有可自动继续的工作，`next` 写怎么处理用户最新一条消息，或一句收尾小结），否则回复「不压」。日志记录 `self-check`，下一个回合再记 `self-check:compacted` 或 `self-check:declined`。`turnEndCheck=false` 只关闭这一项。
+**回合末自检。** 让整个流程全自动的兜底。主会话 `turn.complete` 时（未中止、交互式、门槛通过、无排队请求），按顺序检查：本轮是否出现节点信号；这一轮是否做了实活（主会话至少 `WORK_TURN_MIN_CALLS = 2` 次工具调用）且上下文不低于实活档 `C(workCalls)`；或上下文已到节点档以上仍未压缩。强节点信号要求到下限，弱信号要求到节点档。只有 `AskUserQuestion` 会抑制自检，末尾问号不会：收尾总结常常带问句，历史里的压缩正落在这些点上。每个触发点每涨 5 个百分点最多自检一次，两次自检之间没有工具活动则不连续自检。经过常规 1.5 秒防抖并空闲后，插件提交一条 prompt：阶段已收尾就调用 `compact_now`（若之后没有可自动继续的工作，`next` 写怎么处理用户最新一条消息，或一句收尾小结），否则回复「不压」。日志记录 `self-check`，下一个回合再记 `self-check:compacted` 或 `self-check:declined`。`turnEndCheck=false` 只关闭这一项。
 
 **新工作块提示。** 人工输入（composer 或 bridge）的 prompt，只要门槛通过且无排队请求，就给模型加一行：若这条消息开启新工作块（换话题，或停顿后重新接着做）且上一块已收尾，先调用 `compact_now`，`next` 写这条需求的要点。只看换话题会漏掉停顿场景：历史里大量 `/compact` 是在一块工作收尾之后、下一条指令之前手动敲的。
 

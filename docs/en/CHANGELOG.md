@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.5.0 - 2026-11-18
+
+- Changed: every threshold derives from P, the learned post-compact size. The floor is `max(C(floorCalls), floorPct x window)`; the node, work and urgent tiers follow, with `C(N) = (10 x F + N x P) / (N - 1)` and `F` = `compactCostK`. Each tier is capped at `urgent = min(urgentK x 1k, 0.8 x window)`.
+- Added: P learning. The first main step after each compaction is a measured sample, folded into an exponentially weighted average per project and globally in `~/.claude/self-compact/profile.json`, with outlier handling; fallback is the session sample, project, global, then baseline + 25k. `log.jsonl` gains `pSample`.
+- Added: one-time per-session heavy-harness hint when compaction pays little (`C(workCalls)` at or above `urgentK`).
+- Added: options `floorCalls`, `nodeCalls`, `workCalls`, `urgentK`, `compactCostK`. `floorPct` now defaults to 0.
+- Deprecated: `minSavingK`, `nudgeStartPct` and `urgentPct` are accepted, ignored and logged once at session start.
+- Fixed: a failed tool re-registration is retried on the next step instead of waiting for P to change.
+
 ## 0.4.0 - 2026-11-14
 
 - Added: the compact-instruction preamble names what the summarizer must copy exactly (file paths with line numbers, signatures and load-bearing code lines, error strings, numbers and IDs, the original request and how the goal changed) and what it may drop (logs whose result is stated, repeated reads, the step-by-step path to a conclusion, dead ends reduced to their lesson).

@@ -65,15 +65,15 @@ After that there is nothing to run. Claude decides when to call the tool.
 
 Two layers. The plugin enforces a floor. Claude decides everything above it, guided by the tool description and by nudges.
 
-The plugin refuses a call unless the tokens are at least `floorPct` of the window and at least `minSavingK` above the estimated post-compact size (session baseline + 20k). The baseline is the context size of the session's first main request, read only when the conversation has at most 3 messages (65k otherwise, for example on a resumed session). With the defaults and a 65k baseline the floor is 125k, or 12.5% of a 1M window; on a 200k window the same 125k is 62.5%, so the tool now opens there instead of staying shut.
+The plugin derives every threshold from P, the learned post-compact size (see the [cost model](#cost-model)). It refuses a call below the floor, `max(C(floorCalls), floorPct x window)`, where `C(floorCalls)` is the size at which compacting pays back within 20 later calls. With P = 65k the floor is 124k; on a heavy setup it rises with P. Every tier is capped at the urgent size, `min(urgentK x 1k, 80% of the window)`, so a small window still opens the tool.
 
 | Context | Behavior |
 | --- | --- |
-| below 10% | denied by the plugin |
-| 10-15% | big phase handoffs only (spec to plan, plan to implementation, MR up to review) |
-| 15% and up | any clean node |
-| 20% and up | nudge, then again every 5% |
-| 35% and up | nudge wording escalates: compact at the next safe step |
+| below the floor (`C(20)`) | denied by the plugin |
+| floor to node (`C(10)`) | big phase handoffs only (spec to plan, plan to implementation, MR up to review) |
+| node (`C(10)`) and up | any clean node |
+| node, then every 5% | nudge |
+| urgent (350k or 80% of the window) and up | nudge wording escalates: compact at the next safe step |
 
 Nudges ride on the next text tool result, or on the next prompt's context. They are silent while a request is queued or compacting, in subagents, in non-interactive sessions and when disabled.
 
@@ -121,15 +121,17 @@ After compaction the same standing orders and pending items arrive again, verbat
 
 A compaction costs tokens and time: it generates a summary and re-caches what remains. It pays off when enough calls follow at the smaller size.
 
-Assumptions: relative to the input price, cache read is 0.1x, 1-hour cache write 2x and output 5x. The context left after a compaction is about 20k tokens (median over 83 compactions in the author's sessions). One compaction costs about `0.1 x C + 105k` input-equivalent tokens, where `C` is the context size before and 105k is a conservative fixed estimate for the summary and re-caching. Each later call saves `0.1 x (C - 20k)`.
+Assumptions: relative to the input price, cache read is 0.1x, 1-hour cache write 2x and output 5x. One compaction costs about `10 x F` in cache-read-equivalent tokens, where `F` is `compactCostK` (default 105k, a conservative fixed estimate for generating the summary and re-caching). Not compacting costs `0.1 x (C - P)` more on every later call, where `C` is the current context and `P` is the post-compact size. Compacting at `C` pays back within `N` calls when `N x 0.1 x (C - P) >= 10 x F`, which gives `C(N) = (10 x F + N x P) / (N - 1)`.
 
-| Context before | Cost of compacting | Saved per call | Break-even |
+| P (post-compact size) | C(8) | C(10) | C(20) |
 | --- | --- | --- | --- |
-| 100k | 115k | 8k | about 14 calls |
-| 150k | 120k | 13k | about 9 calls |
-| 200k | 125k | 18k | about 7 calls |
+| 65k | 224k | 189k | 124k |
+| 87k | 249k | 213k | 147k |
+| 120k | 287k | 250k | 182k |
 
-A compaction leaves about 20k behind on the measured setup, so the saving per call is 0.1 x (context - 20k). The floor sits near 100k tokens on a 1M window (10%) and near 80k on a 200k window (baseline + 60k): below that, compacting early costs more than it saves. A compaction takes 30-55 seconds. These numbers are estimates; `log.jsonl` records before and after percentages so you can check them on your own sessions.
+Where P comes from: the first main step after each compaction is a real measurement of the post-compact size, stored in `~/.claude/self-compact/profile.json` as an exponentially weighted average (alpha 0.3) per project and globally. A sample more than 50% away from the average is an outlier and moves it less (alpha 0.1); three outliers in a row in the same direction reset the average to their mean. An estimate is trusted from 3 samples. Until then P falls back in order to this session's sample, the project's estimate, the global estimate, then the session baseline plus 25k (the baseline is 65k when unknown, so P = 90k). `afterPct` in `log.jsonl` is the size the compaction reported, which is the summary; `pSample` is the measured size of the first real request after it.
+
+A heavy harness (large MCP or skill definitions) has a large P and compaction pays little. When `C(workCalls)` reaches `urgentK`, the plugin tells Claude once per session that the harness is heavy and suggests trimming MCP servers or skills. A compaction takes 30-55 seconds. These numbers are estimates; `log.jsonl` records the sizes so you can check them on your own sessions.
 
 ## Configuration
 
@@ -138,15 +140,19 @@ Set the options through the plugin settings (`userConfig` in `plugin.json`), for
 | Option | Default | Meaning |
 | --- | --- | --- |
 | `language` | en | `en` or `zh`: language of the tool description, denials, toasts, nudges and continuation prompt; any other value falls back to `en` |
-| `floorPct` | 10 | hard floor, percent of the window |
-| `minSavingK` | 40 | the floor is also at least baseline + 20k + this many thousand tokens, so a small window still gets a worthwhile saving |
-| `nudgeStartPct` | 20 | first nudge (raised to the floor when higher) |
+| `floorPct` | 0 | extra floor as a percent of the window; the floor is the larger of this and the `floorCalls` size |
+| `floorCalls` | 20 | floor = the context where compacting pays back within this many later calls (see [cost model](#cost-model)); at least 2 |
+| `nodeCalls` | 10 | node tier: any clean node is allowed from the size that pays back within this many calls |
+| `workCalls` | 8 | work tier: the turn-end self-check treats a work block as a node from this payback size |
+| `urgentK` | 350 | urgent tier in thousand tokens, capped at 80% of the window; every other tier is clamped to it (minimum 50) |
+| `compactCostK` | 105 | fixed cost of one compaction in thousand tokens (summary plus re-caching); minimum 1 |
 | `nudgeStepPct` | 5 | gap between nudges |
-| `urgentPct` | 35 | escalated nudge wording |
 | `releaseStopHooks` | false | true: a queued compaction ends a turn that another Stop hook (such as /goal) holds open. Only works on personal (non-managed) setups; the built-in guard skips user mods' Stop hooks elsewhere (see FAQ) |
 | `autoNodes` | true | Autonomous triggers: a one-line flag after node-like tool calls (push, merge, PR, tests green, message sent, spec/plan written, todos done), a turn-end self-check, and a hint on every human prompt once the gate is open. false turns all three off |
 | `turnEndCheck` | true | The turn-end self-check only (needs `autoNodes`): after a node, a turn that did real work, or a long uncompacted stretch, one extra turn asks Claude whether to compact |
 | `enabled` | true | false: the tool stays registered, every call is denied, no nudges |
+
+The older `minSavingK`, `nudgeStartPct` and `urgentPct` are still accepted but ignored; the plugin writes one log line at session start when it sees them. Remove them from your settings.
 
 `DISABLE_COMPACT=1` in the environment also denies every call. Handoff content (your standing orders, decisions) stays in whatever language you used; `language` only changes the plugin's own text.
 
