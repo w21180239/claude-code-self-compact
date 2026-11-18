@@ -111,11 +111,13 @@ claude plugin install self-compact@claude-code-self-compact
 
 ## 交接单保留什么
 
-`compact_now` 接收结构化的交接单：`node`、`objective`、`standing_orders`（你的规则和授权，用你的原话）、`decisions`（含原因）、`artifacts`、`pending`（每个在跑的任务及回报方式）、`done`、`next`、`language`（见下），以及可选的 `drop` 和 `lessons`（试过不行的做法及原因）。缺必填字段时调用被拒绝，并指出缺哪一项。
+`compact_now` 接收结构化的交接单：`node`、`objective`、`standing_orders`（你的规则和授权，用你的原话）、`decisions`（含原因）、`artifacts`、`pending`（每个在跑的任务及回报方式）、`done`、`next`、`language`（见下），以及可选的 `drop` 和 `lessons`（试过不行的做法及原因），以及 `keep_skills` 和 `drop_skills`（skill 名，见下）。缺必填字段时调用被拒绝，并指出缺哪一项。
 
-插件把它渲染成 `handoff-<n>.md`，附上你最初的需求（每个会话只存一次，多次压缩也不会走样）和最近 5 条真实消息（过滤掉命令、系统提醒、任务通知），再作为压缩指令发出。前面的固定前言要求 summarizer 原样保留常驻规则、列全待处理项、以 `next` 收尾；带行号的路径、报错原文、数值和签名原样照抄；过时的日志、重复读取和走不通的路可以丢，但留下教训。指令总长上限 8,000 字符，超出时先截 `done`，再截你最早的消息；`standing_orders`、`pending`、`next` 和语言约定永远不截。
+插件把它渲染成 `handoff-<n>.md`，附上你最初的需求（每个会话只存一次，多次压缩也不会走样）和最近 5 条真实消息（过滤掉命令、系统提醒、任务通知），再作为压缩指令发出。前面的固定前言要求 summarizer 原样保留常驻规则、列全待处理项、以 `next` 收尾；带行号的路径、报错原文、数值和签名原样照抄；过时的日志、重复读取和走不通的路可以丢，但留下教训。指令总长上限 8,000 字符，超出时先截 `done`，再截你最早的消息；`standing_orders`、`pending`、`next`、语言约定和热 skill 那一句永远不截。
 
 `language` 携带你按渠道区分的语言约定：`chat`（你设定的对话语言）和 `outputs`（每个渠道一条，用你的原话，如“代码/commit/PR：英文”）。schema 里它是必填项，但缺失永远不会阻止压缩。逐个字段取值：本次调用给的优先，其次是本会话上一次压缩继承下来的，最后（仅 `chat`）用你最近 5 条真实消息检测出的语言（CJK 字符占非空白字符 30% 以上记为中文，否则英文；插件自己发的提示不计入）。合并后的约定写在 `handoff-<n>.md` 最前面的“语言约定”小节；压缩指令要求 summarizer 用对话语言写摘要，并把每条规则原样抄进摘要的第一节；续接消息的第一行就是约定行（`对话：中文｜代码/commit/PR：英文｜…`）。压缩后的前 3 条真实用户提示，插件还会把这一行附在提示的上下文里；插件自己提交的提示和斜杠命令不计数。约定在多次压缩之间保留，随会话结束清除。
+
+**skill 工作集。** 每次压缩后，引擎会自己把你调用过的每个 skill 的完整正文重新注入；mod 看不到也改不了这一步（托管登录会跳过用户 mod 的 `prompt.attachment` 和 `skill.prompt` 钩子），所以插件不碰它。压缩真正丢掉的是 skill 的工作集：在 skill 目录下读过的参考文件（如 `references/voice.md`），以及工作做到流程的哪一步。插件对主会话里用 `Skill` 工具加载的每个 skill 记录：最近一次使用的请求序号，和在 `/skills/<name>/` 下读写过的文件（Read、Grep、Glob、Edit、Write，或 Bash 命令里的路径；最多 8 个，最近的在前；`SKILL.md` 算使用，不算参考文件）。路径先规范化（`..`、`.`、`~`、相对路径；越出根的忽略），且只在含 `SKILL.md` 的目录下才算；两个已加载 skill 短名相同时，按路径里的插件段归属，否则归最近加载的。压缩时，skill 在 `keep_skills` 里、或最近 `hotWindow` 个主请求内用过、或历史漏读率在 3 次以上压缩中不低于 0.3，即为热；在 `drop_skills` 里且不在 `keep_skills` 里则为已完成。压缩指令随后让 summarizer 为每个热 skill 写明走到哪一步、还剩什么（不会被截断的一句）。续接消息在语言行和下一步之后多一节「skill 工作集」：每个热 skill 一行“仍在使用”加它的参考文件，不超过 `refInlineK` 千 token 的文件在总量不超过 `skillBudgetK` 时直接内联，其余只列路径、需要时再读（读不出来的也只列路径）。读之前先用 `$.fs.stat` 查大小，更大的文件从不读取；预算用完就停止读取，真实路径跑出 skill 目录的参考文件只列路径、不读。压缩指令那一句最多点 8 个热 skill，其余计数；每个已完成 skill 一行，说明它已完成、重新注入的指令不再适用。没有热或已完成的 skill 时整节省略。学习：压缩后 30 个请求内主会话 Read 了只列路径的参考文件，记一次漏读（`skill-ref-miss`），并在 `profile.json` 里给该 skill 的 `refMisses` 加一；Read 已内联的文件只记 `skill-ref-reread`。子 agent 的调用一律忽略。
 
 压缩之后，同样的常驻规则和待处理项会再通过续接消息原文送回，不依赖 summarizer 怎么转述。Claude 也可以回读完整的交接文件；续接消息还会告诉它，需要压缩前的确切细节时去 grep 本会话的 transcript。
 
@@ -149,6 +151,9 @@ P 的来源：每次压缩后的第一个主轮请求是压后大小的真实测
 | `urgentK` | 350 | 紧急档，单位千 tokens，上限为窗口的 80%；其余各档都被它截顶（最小 50），再抬到至少 P + 25k |
 | `compactCostK` | 105 | 一次压缩的固定成本，单位千 tokens（摘要加重新缓存），最小 1 |
 | `nudgeStepPct` | 5 | 提醒间隔 |
+| `hotWindow` | 20 | 压缩时，最近这么多个主请求内用过的 skill 算热（最小 1） |
+| `refInlineK` | 2 | 不超过这么多千 token（每 token 按 4 字符）的 skill 参考文件内联进续接消息；0 表示全部只列路径 |
+| `skillBudgetK` | 6 | 每次压缩内联的 skill 参考文件总量（千 token）；0 表示不内联 |
 | `releaseStopHooks` | false | true 时，排队中的压缩可以结束被其他 Stop hook（如 /goal）撑住的回合。仅在个人（非托管）环境有效；其他环境下内置 guard 会跳过用户 mod 的 Stop hook（见 FAQ） |
 | `autoNodes` | true | 自主触发：节点类工具调用（push、merge、PR、测试通过、消息已发、spec/plan 落盘、待办全完成）后附一行标记，回合末自检，门槛已开时每个人工 prompt 带新工作块提示。false 同时关闭这三项 |
 | `turnEndCheck` | true | 仅回合末自检（依赖 `autoNodes`）：出现节点、回合做了实活或长时间未压缩后，多开一个回合问 Claude 是否压缩 |
@@ -164,8 +169,8 @@ P 的来源：每次压缩后的第一个主轮请求是压后大小的真实测
 
 - `<session-id>/handoff-<n>.md`：渲染后的交接单，加上你最初的需求和最近 5 条真实消息。
 - `<session-id>/intent.md`：你在本会话的第一条消息，上限 1,500 字符。
-- `profile.json`：学到的压后大小 P，按项目（以 cwd 绝对路径为键）和全局各一份，附样本数。
-- `log.jsonl`：每次请求一行 JSON，字段有 `ts`、`session`、`node`、`pct`（请求时占比）、`result`（`queued`、`denied:<原因>`、`done`、`preempted`、`aborted`、`stale`、`failed`、`error`、`p-sample`、`deprecated`、`tool-describe`、`lang-drift`）、可选的 `reason`、`langSource`（对话语言的来源：`tool`、`inherited`、`detected` 或 `none`；在 `queued` 和 `done` 上）、`expected` 和 `got`（在 `lang-drift` 上：对话语言类别和压缩后首条助手回复的类别）、`beforePct`、`afterPct`、`durationMs`、`pSample`（压后实测大小）、`p`（当时采用的 P）。
+- `profile.json`：学到的压后大小 P，以及按 skill 记录的 `skills: { <name>: { compactions, refMisses } }`；P 按项目（以 cwd 绝对路径为键）和全局各一份，附样本数。
+- `log.jsonl`：每次请求一行 JSON，字段有 `ts`、`session`、`node`、`pct`（请求时占比）、`result`（`queued`、`denied:<原因>`、`done`、`preempted`、`aborted`、`stale`、`failed`、`error`、`p-sample`、`deprecated`、`tool-describe`、`lang-drift`、`skill-ref-miss`、`skill-ref-reread`）、可选的 `reason`、`langSource`（对话语言的来源：`tool`、`inherited`、`detected` 或 `none`；在 `queued` 和 `done` 上）、`expected` 和 `got`（在 `lang-drift` 上：对话语言类别和压缩后首条助手回复的类别）、`beforePct`、`afterPct`、`durationMs`、`pSample`（压后实测大小）、`p`（当时采用的 P）。`done` 和 `preempted` 行可带 `skills`（`{ hot, done, inlinedK, listed }`：热和已完成的 skill 名、内联的千 token 数、只列路径的参考文件数）；`skill-ref-miss` 和 `skill-ref-reread` 带 `skill` 和 `path`。
 
 数据不会离开你的机器。插件不发起网络请求，也没有依赖。压缩本身用的是 Claude Code 自带的 `$.session.compact`，所以摘要由你这次会话所用的同一个模型和账号生成。交接文件里是你在对话中的原话，想删随时可以删这个目录。
 

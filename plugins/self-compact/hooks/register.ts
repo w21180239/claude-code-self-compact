@@ -13,6 +13,9 @@ export type Config = {
   autoNodes: boolean
   turnEndCheck: boolean
   language: Lang
+  hotWindow: number
+  refInlineK: number
+  skillBudgetK: number
 }
 
 export const DEFAULTS: Config = {
@@ -28,6 +31,9 @@ export const DEFAULTS: Config = {
   autoNodes: true,
   turnEndCheck: true,
   language: 'en',
+  hotWindow: 20,
+  refInlineK: 2,
+  skillBudgetK: 6,
 }
 
 // Empty session context, measured on the first main request when unavailable.
@@ -84,6 +90,14 @@ type Strings = {
   langInstruction: (chat: string | undefined) => string
   langReinforce: (line: string) => string
   language: string
+  keep_skills: string
+  drop_skills: string
+  skillInstruction: (names: string) => string
+  skillMore: (n: number) => string
+  contSkills: string
+  skillHot: (name: string) => string
+  skillRefListed: (path: string) => string
+  skillDone: (name: string) => string
   hLessons: string
   hIntent: string
   hRecent: string
@@ -212,6 +226,14 @@ export const STRINGS: Record<Lang, Strings> = {
         : `Language: write the summary in ${chat}; its first section is 'Language rules', copying each outputs rule verbatim.`,
     langReinforce: line => `[self-compact] Language rules still apply: ${line}`,
     language: 'Fill in the language rules this session actually uses, not global defaults: chat = the conversation language as the user set it, outputs = one rule per channel (code, commit, PR, spec, outgoing text) in the user\'s words.',
+    keep_skills: 'Skills (names) whose work continues after this compaction (optional)',
+    drop_skills: 'Skills (names) whose work is finished and no longer applies (optional)',
+    skillMore: n => `+${n} more`,
+    skillInstruction: names => `Skills in use: ${names}. For each, record in the summary which step of its procedure you reached and what remains.`,
+    contSkills: 'Skill working set:',
+    skillHot: name => `${name}: still in use`,
+    skillRefListed: path => `${path} (re-read when needed)`,
+    skillDone: name => `${name}: finished; its re-injected instructions no longer apply.`,
     hLessons: 'Lessons from dead ends',
     hIntent: 'Original request',
     hRecent: 'Recent user messages',
@@ -332,6 +354,14 @@ After "Queued", end the turn now: one line, call no more tools.
         : `用「${chat}」写摘要；摘要的第一节是「语言约定」，outputs 各条规则原样照抄。`,
     langReinforce: line => `[self-compact] 语言约定仍然有效：${line}`,
     language: '填本会话实际在用的语言约定，不是全局默认：chat 写用户设定的对话语言，outputs 每个渠道（代码、commit、PR、spec、对外文字）一条，用用户的原话。',
+    keep_skills: '压缩后仍要继续的 skill 名（可选）',
+    drop_skills: '已完成、不再适用的 skill 名（可选）',
+    skillMore: n => `等另 ${n} 个`,
+    skillInstruction: names => `在用的 skill：${names}。摘要里逐个写明它的工作集：流程走到了哪一步、还剩什么。`,
+    contSkills: 'skill 工作集：',
+    skillHot: name => `${name}：仍在使用`,
+    skillRefListed: path => `${path}（需要时再读）`,
+    skillDone: name => `${name}：已完成；重新注入的指令不再适用。`,
     hLessons: '走不通的路及教训',
     hIntent: '用户最初的需求',
     hRecent: '用户最近原话',
@@ -513,6 +543,9 @@ export function configFrom(options: Record<string, unknown> | undefined): Config
     autoNodes: flag(o.autoNodes),
     turnEndCheck: flag(o.turnEndCheck),
     language: o.language === 'zh' ? 'zh' : 'en',
+    hotWindow: Math.max(1, Math.round(num(o.hotWindow, DEFAULTS.hotWindow))),
+    refInlineK: Math.max(0, num(o.refInlineK, DEFAULTS.refInlineK)),
+    skillBudgetK: Math.max(0, num(o.skillBudgetK, DEFAULTS.skillBudgetK)),
   }
 }
 
@@ -533,6 +566,8 @@ export type Handoff = {
   drop?: string[]
   lessons?: string[]
   language?: LangRules
+  keep_skills?: string[]
+  drop_skills?: string[]
 }
 
 const isText = (v: unknown): v is string => typeof v === 'string' && v.trim() !== ''
@@ -546,6 +581,13 @@ function parseLanguage(v: unknown): LangRules | undefined {
   const o = v as Record<string, unknown>
   if (typeof o.chat !== 'string' || !Array.isArray(o.outputs) || !o.outputs.every(x => typeof x === 'string')) return undefined
   return { chat: o.chat.trim(), outputs: (o.outputs as string[]).map(s => s.trim()).filter(s => s !== '') }
+}
+
+/** Skill names to keep or drop; anything but an array of strings counts as absent, and never blocks a compaction. */
+function parseNames(v: unknown): string[] | undefined {
+  if (!Array.isArray(v) || !v.every(x => typeof x === 'string')) return undefined
+  const names = (v as string[]).map(s => s.trim()).filter(s => s !== '')
+  return names.length > 0 ? names : undefined
 }
 
 /** `standing_orders` and `pending` may be empty arrays; every other field but `drop` and `lessons` is required. */
@@ -573,6 +615,10 @@ export function validateHandoff(x: unknown): HandoffCheck {
   if (o.lessons !== undefined) h.lessons = o.lessons as string[]
   const language = parseLanguage(o.language)
   if (language !== undefined) h.language = language
+  const keep = parseNames(o.keep_skills)
+  if (keep !== undefined) h.keep_skills = keep
+  const dropped = parseNames(o.drop_skills)
+  if (dropped !== undefined) h.drop_skills = dropped
   return { ok: true, h }
 }
 
@@ -708,19 +754,26 @@ export function firstUserMessage(msgs: readonly { role: string; text: string }[]
 
 export const INSTRUCTIONS_CAP = 8_000
 
-/** Compact instructions within INSTRUCTIONS_CAP: drops `done`, then the oldest user messages, then (last resort) `drop`, `lessons`, the original request, `decisions`, `artifacts`. standing_orders, pending, next and the language rules are never trimmed. */
+// The hot-skill line names at most this many skills.
+const MAX_HOT_NAMES = 8
+
+/** Compact instructions within INSTRUCTIONS_CAP: drops `done`, then the oldest user messages, then (last resort) `drop`, `lessons`, the original request, `decisions`, `artifacts`. standing_orders, pending, next, the language rules and the hot-skill line are never trimmed. */
 export function buildInstructions(
   h: Handoff,
   userMsgs: readonly string[],
   handoffPath: string,
   lang: Lang = 'en',
   intent?: string,
+  hotSkills: readonly string[] = [],
 ): string {
   const t = STRINGS[lang]
   // Never trimmed: it is what keeps the rules alive through the summariser.
   const langInstruction = hasLang(h.language) ? `${t.langInstruction(h.language.chat === '' ? undefined : h.language.chat)}\n\n` : ''
+  const shown = hotSkills.slice(0, MAX_HOT_NAMES).join(', ')
+  const listed = hotSkills.length > MAX_HOT_NAMES ? `${shown} ${t.skillMore(hotSkills.length - MAX_HOT_NAMES)}` : shown
+  const skillInstruction = hotSkills.length > 0 ? `${t.skillInstruction(listed)}\n\n` : ''
   const build = (hh: Handoff, msgs: readonly string[], it: string | undefined): string =>
-    `${t.preamble}\n\n${langInstruction}${renderHandoff(hh, msgs, lang, it)}\n\n${t.tail(handoffPath)}`
+    `${t.preamble}\n\n${langInstruction}${skillInstruction}${renderHandoff(hh, msgs, lang, it)}\n\n${t.tail(handoffPath)}`
   let cur: Handoff = h
   let msgs = [...userMsgs]
   let it = intent
@@ -745,6 +798,8 @@ export type Continuation = {
   pending: string[]
   sessionId?: string
   language?: LangRules
+  /** Rendered skill working set (see renderSkillSection). */
+  skills?: string
 }
 
 export function continuationText(p: Continuation, lang: Lang = 'en'): string {
@@ -755,6 +810,7 @@ export function continuationText(p: Continuation, lang: Lang = 'en'): string {
     ...(rules !== undefined ? [rules] : []),
     t.contHead(p.node, p.beforePct, after, p.handoffPath),
     t.contNext(p.next ?? t.contNextFallback),
+    ...(p.skills !== undefined ? [p.skills] : []),
     `${t.contStanding}\n${p.standing_orders.length > 0 ? bullets(p.standing_orders) : t.none}`,
     `${t.contPending}\n${p.pending.length > 0 ? bullets(p.pending) : t.none}`,
     t.contClosing,
@@ -762,6 +818,215 @@ export function continuationText(p: Continuation, lang: Lang = 'en'): string {
   // Models do not look back on their own; the pointer has to be explicit.
   if (p.sessionId) lines.push(t.contRecall(p.sessionId))
   return lines.join('\n\n')
+}
+
+// ---- skill working set ----
+// The engine re-injects every invoked skill's body after a compaction; mods cannot see or change that.
+// What the compaction loses is the working set: the reference files read under the skill dir and the step the work reached.
+
+export type SkillUse = { name: string; short: string; lastUse: number; refs: string[] }
+export type SkillPrior = { compactions: number; refMisses: number }
+export const MAX_REFS = 8
+// A ref read this many main requests after a compaction is a miss.
+export const MISS_WINDOW = 30
+const MIN_PRIOR_COMPACTIONS = 3
+const PRIOR_MISS_RATE = 0.3
+const CHARS_PER_TOKEN = 4
+
+const shortName = (name: string): string => name.slice(name.lastIndexOf(':') + 1)
+
+export type PathEnv = { cwd?: string; home?: string }
+
+/** Lexically collapses `.`, `..` and `//`, resolving `~` and relative paths against `env`; undefined when the path climbs above its root or `~` has no home. */
+export function normalizePath(path: string, env: PathEnv = {}): string | undefined {
+  let p = path.replace(/\\/g, '/')
+  if (p === '~' || p.startsWith('~/')) {
+    if (!env.home) return undefined
+    p = env.home.replace(/\\/g, '/').replace(/\/+$/, '') + p.slice(1)
+  } else if (!/^([A-Za-z]:)?\//.test(p) && env.cwd) {
+    p = `${env.cwd.replace(/\\/g, '/').replace(/\/+$/, '')}/${p}`
+  }
+  const root = /^([A-Za-z]:)?\//.exec(p)?.[0] ?? ''
+  const segs = p.slice(root.length).split('/')
+  const out: string[] = []
+  for (const s of segs) {
+    if (s === '' || s === '.') continue
+    if (s === '..') {
+      if (out.length === 0) return undefined
+      out.pop()
+    } else out.push(s)
+  }
+  const last = segs[segs.length - 1]
+  const dirLike = last === '' || last === '.' || last === '..'
+  return root + out.join('/') + (dirLike && out.length > 0 ? '/' : '')
+}
+
+type SkillPath = { kind: 'main' | 'dir' | 'ref'; prefix: string }
+
+/** `prefix` is the path up to and including `/skills/<short>/`; kind: 'main' = the skill's SKILL.md, 'dir' = the dir itself, 'ref' = any other file under it. Undefined when the path is elsewhere. */
+function skillPathKind(norm: string, short: string): SkillPath | undefined {
+  const marker = `/skills/${short}/`
+  const i = norm.indexOf(marker)
+  if (i < 0) return undefined
+  const prefix = norm.slice(0, i + marker.length)
+  const rest = norm.slice(prefix.length)
+  return { prefix, kind: rest === '' ? 'dir' : rest === 'SKILL.md' ? 'main' : 'ref' }
+}
+
+const FILE_LIKE = /^[^*?{}[\]]+\.[A-Za-z0-9]+$/
+const PATH_SPLIT = /[\s'"`<>|;&()=]+/
+
+/** A Bash token without trailing punctuation or a `:<line>[:<col>]` suffix. */
+function cleanToken(t: string): string {
+  let cur = t
+  for (;;) {
+    if (/(^|\/)\.\.?$/.test(cur)) return cur // keep `.`/`..` segments for normalizePath
+    const next = cur.replace(/[,.;:)'"]+$/, '').replace(/:\d+(:\d+)?$/, '')
+    if (next === cur) return cur
+    cur = next
+  }
+}
+
+/** Paths a main-session tool call touches, with whether each is known to be a file. */
+function touchedPaths(tool: string, args: Record<string, unknown>): { path: string; file: boolean }[] {
+  const str = (v: unknown): string[] => (typeof v === 'string' && v !== '' ? [v] : [])
+  if (tool === 'Read' || tool === 'Edit' || tool === 'Write' || tool === 'MultiEdit' || tool === 'NotebookEdit') {
+    return [...str(args.file_path), ...str(args.notebook_path), ...str(args.path)].map(path => ({ path, file: true }))
+  }
+  if (tool === 'Grep' || tool === 'Glob') {
+    return [...str(args.path), ...(tool === 'Glob' ? str(args.pattern) : [])].map(path => ({ path, file: FILE_LIKE.test(path) }))
+  }
+  if (tool === 'Bash') {
+    return str(args.command)
+      .flatMap(c => c.split(PATH_SPLIT))
+      .filter(t => t.includes('skills/'))
+      .map(cleanToken)
+      .map(path => ({ path, file: FILE_LIKE.test(path) }))
+  }
+  return []
+}
+
+/** `true` = the prefix holds a SKILL.md, `false` = it does not, `undefined` = not probed yet. */
+export type RootCheck = (prefix: string) => boolean | undefined
+/** A use whose skill dir has not been probed: apply it once `prefix` is confirmed. */
+export type Deferred = { prefix: string; apply: () => void }
+
+/** The loaded skill a path belongs to among those sharing its short name: the one whose plugin segment is in the path, else the latest loaded (Map order). */
+function ownerOf(skills: Map<string, SkillUse>, short: string, prefix: string): SkillUse | undefined {
+  const same = [...skills.values()].filter(s => s.short === short)
+  if (same.length <= 1) return same[0]
+  const segs = prefix.split('/')
+  const byPlugin = same.filter(s => s.name !== s.short && segs.includes(s.name.slice(0, s.name.lastIndexOf(':'))))
+  return (byPlugin.length > 0 ? byPlugin : same).at(-1)
+}
+
+/** Records a main-session Skill load, and any later use of a loaded skill's dir; `skills` is updated in place. A path counts only under a dir `isRoot` confirms; uses under an unprobed dir come back deferred. */
+export function trackSkillCall(
+  skills: Map<string, SkillUse>,
+  tool: string,
+  input: unknown,
+  nowReq: number,
+  isRoot: RootCheck,
+  env: PathEnv = {},
+): Deferred[] {
+  const flat = asObj(input) ?? {}
+  const args = asObj(flat.input) ?? flat
+  if (tool === 'Skill') {
+    const raw = args.skill ?? args.name
+    const name = typeof raw === 'string' ? raw.trim() : ''
+    if (name === '') return []
+    const prev = skills.get(name)
+    if (prev !== undefined) {
+      prev.lastUse = nowReq
+      // Re-insert so Map order stays load order: a collision goes to the latest load.
+      skills.delete(name)
+      skills.set(name, prev)
+    } else skills.set(name, { name, short: shortName(name), lastUse: nowReq, refs: [] })
+    return []
+  }
+  if (skills.size === 0) return []
+  const deferred: Deferred[] = []
+  for (const { path, file } of touchedPaths(tool, args)) {
+    const norm = normalizePath(path, env)
+    if (norm === undefined) continue
+    for (const short of new Set([...skills.values()].map(s => s.short))) {
+      const hit = skillPathKind(norm, short)
+      if (hit === undefined) continue
+      const s = ownerOf(skills, short, hit.prefix)
+      if (s === undefined) continue
+      const apply = (): void => {
+        s.lastUse = nowReq
+        if (hit.kind === 'ref' && file) s.refs = [norm, ...s.refs.filter(r => r !== norm)].slice(0, MAX_REFS)
+      }
+      const root = isRoot(hit.prefix)
+      if (root === true) apply()
+      else if (root === undefined) deferred.push({ prefix: hit.prefix, apply })
+    }
+  }
+  return deferred
+}
+
+const named = (list: readonly string[], s: SkillUse): boolean => list.some(x => x === s.name || x === s.short)
+
+function priorHot(p: SkillPrior | undefined): boolean {
+  return p !== undefined && p.compactions >= MIN_PRIOR_COMPACTIONS && p.refMisses / p.compactions >= PRIOR_MISS_RATE
+}
+
+export type Tiers = { hot: SkillUse[]; done: SkillUse[] }
+
+/** keep_skills wins over drop_skills, which wins over activity: the model saying a skill is finished outranks a recent last use. Hot skills come newest first. */
+export function tierSkills(
+  skills: readonly SkillUse[],
+  keep: readonly string[],
+  drop: readonly string[],
+  nowReq: number,
+  hotWindow: number,
+  priors: Record<string, SkillPrior>,
+): Tiers {
+  const hot: SkillUse[] = []
+  const done: SkillUse[] = []
+  for (const s of skills) {
+    if (named(keep, s)) hot.push(s)
+    else if (named(drop, s)) done.push(s)
+    else if (nowReq - s.lastUse <= hotWindow || priorHot(Object.hasOwn(priors, s.name) ? priors[s.name] : undefined)) hot.push(s)
+  }
+  hot.sort((a, b) => b.lastUse - a.lastUse)
+  return { hot, done }
+}
+
+export type HotSkill = { name: string; refs: { path: string; content?: string }[] }
+export type SkillSection = { text: string; inlined: string[]; listed: number; inlinedK: number }
+
+/** The resume-message section. A ref is inlined when its text is known, is at most refInlineK, and the running total stays within budgetK; the rest are listed by path. */
+export function renderSkillSection(
+  hot: readonly HotSkill[],
+  done: readonly string[],
+  lang: Lang,
+  refInlineK: number,
+  budgetK: number,
+): SkillSection | undefined {
+  if (hot.length === 0 && done.length === 0) return undefined
+  const t = STRINGS[lang]
+  const inlined: string[] = []
+  let listed = 0
+  let used = 0
+  const lines: string[] = []
+  for (const s of hot) {
+    lines.push(`- ${t.skillHot(s.name)}`)
+    for (const r of s.refs) {
+      const sizeK = r.content === undefined ? Infinity : r.content.length / CHARS_PER_TOKEN / 1000
+      if (r.content !== undefined && sizeK <= refInlineK && used + sizeK <= budgetK) {
+        used += sizeK
+        inlined.push(r.path)
+        lines.push(`  - ${r.path}:`, fenced(r.content))
+      } else {
+        listed++
+        lines.push(`  - ${t.skillRefListed(r.path)}`)
+      }
+    }
+  }
+  for (const name of done) lines.push(`- ${t.skillDone(name)}`)
+  return { text: `${t.contSkills}\n${lines.join('\n')}`, inlined, listed, inlinedK: Math.round(used * 10) / 10 }
 }
 
 // ---- node signals ----
@@ -868,7 +1133,11 @@ export type Pending = {
   toolCallsSince: number
   nextValid: boolean
   langSource: string
+  tiers: Tiers
 }
+
+/** What the last compaction left of each skill's refs: all of them, which the resume message inlined; a ref leaves `refs` once its miss is counted. */
+type PostCompact = { at: number; refs: Map<string, Set<string>>; inlined: Set<string> }
 
 type State = {
   cfg: Config
@@ -922,6 +1191,15 @@ type State = {
   langTurns: number
   // Chat language class the first assistant reply after a compaction is checked against.
   driftExpect?: ChatLang
+  // Skills loaded this session by name, the main-request counter, and the last compaction's snapshot for ref-miss learning.
+  skills: Map<string, SkillUse>
+  reqs: number
+  // Skill dirs probed for a SKILL.md (prefix -> found), the tracking queue while a probe runs, and the home dir for `~` paths.
+  roots: Map<string, boolean>
+  trackQueue: Promise<void>
+  trackPending: number
+  home?: string | null // null: looked up, none set
+  post?: PostCompact
 }
 
 // One state per loaded module; a session start begins afresh.
@@ -949,6 +1227,11 @@ export const state: State = {
   awaitingCheck: false,
   checkTurn: false,
   langTurns: 0,
+  skills: new Map(),
+  reqs: 0,
+  roots: new Map(),
+  trackQueue: Promise.resolve(),
+  trackPending: 0,
 }
 
 const str = { type: 'string' }
@@ -968,6 +1251,8 @@ function inputSchema(t: Strings) {
       next: { ...str, description: t.next },
       drop: { ...strs, description: t.drop },
       lessons: { ...strs, description: t.lessons },
+      keep_skills: { ...strs, description: t.keep_skills },
+      drop_skills: { ...strs, description: t.drop_skills },
       language: {
         type: 'object',
         description: t.language,
@@ -996,6 +1281,9 @@ type LogLine = {
   langSource?: string
   expected?: string
   got?: string
+  skill?: string
+  path?: string
+  skills?: { hot: string[]; done: string[]; inlinedK: number; listed: number }
 }
 
 // $.fs has no append: each write is read-modify-write, so writers queue behind one another.
@@ -1035,7 +1323,6 @@ async function dataRoot($: Dollar): Promise<string | undefined> {
 // ---- profile ----
 
 export type PEst = { p: number; n: number; out?: { dir: 1 | -1; samples: number[] } }
-export type SkillPrior = { stubbed: number; reloadedAfterStub: number; hot: number; usedAfterHot: number }
 export type Profile = { global?: PEst; byProject: Record<string, PEst>; skills?: Record<string, SkillPrior> }
 
 const OUTLIER_FRAC = 0.5
@@ -1070,6 +1357,20 @@ export function pickP(profile: Profile, cwd: string, sessionSample: number | und
 const validEst = (e: unknown): e is PEst =>
   typeof e === 'object' && e !== null && Number.isFinite((e as PEst).p) && (e as PEst).p > 0 && Number.isFinite((e as PEst).n)
 
+const validPrior = (v: unknown): v is SkillPrior => {
+  const p = v as SkillPrior
+  return typeof v === 'object' && v !== null && Number.isFinite(p.compactions) && p.compactions >= 0 && Number.isFinite(p.refMisses) && p.refMisses >= 0
+}
+
+function parseSkillPriors(v: unknown): Record<string, SkillPrior> | undefined {
+  if (typeof v !== 'object' || v === null || Array.isArray(v)) return undefined
+  const out: Record<string, SkillPrior> = {}
+  for (const [key, p] of Object.entries(v)) {
+    if (key !== '__proto__' && validPrior(p)) out[key] = { compactions: p.compactions, refMisses: p.refMisses }
+  }
+  return Object.keys(out).length > 0 ? out : undefined
+}
+
 export function parseProfile(text: string | undefined): Profile {
   try {
     const o = JSON.parse(text ?? '') as unknown
@@ -1078,8 +1379,12 @@ export function parseProfile(text: string | undefined): Profile {
     const raw = typeof r.byProject === 'object' && r.byProject !== null && !Array.isArray(r.byProject) ? r.byProject : {}
     const byProject: Record<string, PEst> = {}
     for (const [key, est] of Object.entries(raw)) if (key !== '__proto__' && validEst(est)) byProject[key] = est
-    const { global: g, ...rest } = r
-    return validEst(g) ? { ...rest, global: g, byProject } : { ...rest, byProject }
+    const { global: g, skills: rawSkills, ...rest } = r
+    const skills = parseSkillPriors(rawSkills)
+    const out: Profile = { ...rest, byProject }
+    if (validEst(g)) out.global = g
+    if (skills !== undefined) out.skills = skills
+    return out
   } catch {
     return { byProject: {} }
   }
@@ -1170,17 +1475,20 @@ async function handleCompact($: Dollar, input: Record<string, unknown>, isSub: b
   } catch (err) {
     return deny(S().denyWriteFailed(String(err)), 'write-failed', node, g.pct)
   }
+  await state.trackQueue
+  const tiers = tierSkills([...state.skills.values()], h.keep_skills ?? [], h.drop_skills ?? [], state.reqs, state.cfg.hotWindow, state.profile.skills ?? {})
   state.seq = n
   state.lang = h.language
   state.pending = {
     h,
-    instructions: buildInstructions(h, msgs, path, state.cfg.language, intent),
+    instructions: buildInstructions(h, msgs, path, state.cfg.language, intent, tiers.hot.map(s => s.name)),
     handoffPath: path,
     sessionId: sid,
     requestedPct: g.pct,
     toolCallsSince: 0,
     nextValid: true,
     langSource: merged.source,
+    tiers,
   }
   state.retries = 0
   state.waitingNextTurn = false
@@ -1230,7 +1538,7 @@ async function dropPending($: Dollar, p: Pending, line: Omit<LogLine, 'node' | '
 // Real user turns after a compaction that get the language rule line appended.
 export const LANG_REINFORCE_TURNS = 3
 
-function sendContinuation($: Dollar, p: Pending, beforePct: number, afterPct: number | undefined): void {
+function sendContinuation($: Dollar, p: Pending, beforePct: number, afterPct: number | undefined, skills?: string): void {
   const text = continuationText(
     {
     node: p.h.node,
@@ -1242,6 +1550,7 @@ function sendContinuation($: Dollar, p: Pending, beforePct: number, afterPct: nu
     pending: p.h.pending,
     sessionId: p.sessionId,
     language: p.h.language,
+    skills,
     },
     state.cfg.language,
   )
@@ -1257,6 +1566,95 @@ async function giveUp($: Dollar, p: Pending, reason: string): Promise<void> {
   state.notes.push(S().noteFailed(reason))
 }
 
+/** A compaction happened: count it for every loaded skill and snapshot their refs for miss learning. */
+async function noteCompaction($: Dollar): Promise<void> {
+  await state.trackQueue
+  const loaded = [...state.skills.values()]
+  state.post = { at: state.reqs, refs: new Map(loaded.map(s => [s.name, new Set(s.refs)])), inlined: new Set() }
+  const names = loaded.map(s => s.name).filter(n => n !== '__proto__')
+  if (names.length === 0) return
+  const bump = (p: Profile) => {
+    const sk = (p.skills ??= {})
+    for (const n of names) sk[n] = { compactions: (Object.hasOwn(sk, n) ? sk[n].compactions : 0) + 1, refMisses: Object.hasOwn(sk, n) ? sk[n].refMisses : 0 }
+  }
+  bump(state.profile)
+  await saveProfile($, bump)
+}
+
+/** The resume message's skill section for a queued compaction: reads the hot refs, notes which were inlined, and builds the log field. */
+async function skillOutcome($: Dollar, p: Pending): Promise<{ text?: string; log?: NonNullable<LogLine['skills']> }> {
+  await state.trackQueue
+  const { hot, done } = p.tiers
+  if (hot.length === 0 && done.length === 0) return {}
+  const cfg = state.cfg
+  const maxBytes = cfg.refInlineK * 1000 * CHARS_PER_TOKEN
+  const budgetBytes = cfg.skillBudgetK * 1000 * CHARS_PER_TOKEN
+  let usedBytes = 0
+  const realRoots = new Map<string, string | undefined>()
+  // The skill dir's real location with a trailing slash; undefined when it cannot be resolved.
+  const realRoot = async (prefix: string): Promise<string | undefined> => {
+    if (!realRoots.has(prefix)) {
+      const st = await $.fs.stat(prefix, { resolve: true }).catch(() => undefined)
+      const real = st?.kind === 'dir' && st.realPath !== undefined ? normalizePath(st.realPath) : undefined
+      realRoots.set(prefix, real === undefined ? undefined : real.replace(/\/*$/, '/'))
+    }
+    return realRoots.get(prefix)
+  }
+  /** Reads a ref only when a stat says it is a file within refInlineK and the budget left, and its real path stays inside the skill dir. */
+  const readRef = async (s: SkillUse, path: string): Promise<string | undefined> => {
+    if (maxBytes <= 0 || budgetBytes <= 0 || usedBytes >= budgetBytes) return undefined
+    try {
+      const hit = skillPathKind(path, s.short)
+      if (hit?.kind !== 'ref') return undefined
+      const st = await $.fs.stat(path, { resolve: true })
+      if (st.kind !== 'file' || st.size > maxBytes || usedBytes + st.size > budgetBytes || st.realPath === undefined) return undefined
+      const real = normalizePath(st.realPath)
+      const root = await realRoot(hit.prefix)
+      if (real === undefined || root === undefined || !real.startsWith(root) || skillPathKind(real, s.short) === undefined) return undefined
+      const body = await $.fs.read(real, { length: maxBytes })
+      if (typeof body !== 'string') return undefined
+      usedBytes += st.size
+      return body
+    } catch {
+      return undefined
+    }
+  }
+  const hotRefs: HotSkill[] = []
+  for (const s of hot) {
+    const refs: HotSkill['refs'] = []
+    for (const path of s.refs) refs.push({ path, content: await readRef(s, path) })
+    hotRefs.push({ name: s.name, refs })
+  }
+  const section = renderSkillSection(hotRefs, done.map(s => s.name), cfg.language, cfg.refInlineK, cfg.skillBudgetK)
+  if (section === undefined) return {}
+  if (state.post !== undefined) state.post.inlined = new Set(section.inlined)
+  return { text: section.text, log: { hot: hot.map(s => s.name), done: done.map(s => s.name), inlinedK: section.inlinedK, listed: section.listed } }
+}
+
+/** A main Read soon after a compaction: of an inlined ref it is a reread, of a listed one a miss that feeds the skill's prior. */
+async function learnRefRead($: Dollar, raw: string, env: PathEnv): Promise<void> {
+  const post = state.post
+  if (post === undefined || state.reqs - post.at > MISS_WINDOW) return
+  const path = normalizePath(raw, env)
+  if (path === undefined) return
+  for (const [skill, refs] of post.refs) {
+    if (!refs.has(path)) continue
+    if (post.inlined.has(path)) {
+      await logLine($, { result: 'skill-ref-reread', skill, path })
+      continue
+    }
+    refs.delete(path)
+    const bump = (p: Profile) => {
+      const sk = (p.skills ??= {})
+      if (skill === '__proto__') return
+      sk[skill] = { compactions: Object.hasOwn(sk, skill) ? sk[skill].compactions : 0, refMisses: (Object.hasOwn(sk, skill) ? sk[skill].refMisses : 0) + 1 }
+    }
+    bump(state.profile)
+    await saveProfile($, bump)
+    await logLine($, { result: 'skill-ref-miss', skill, path })
+  }
+}
+
 async function runCompact($: Dollar): Promise<void> {
   state.timer = undefined
   const p = state.pending
@@ -1268,9 +1666,10 @@ async function runCompact($: Dollar): Promise<void> {
     const before = pctOf(ctx)
     // Auto-compact got there first: the request is moot, but work still resumes.
     if (ctx.tokens !== undefined && !gate(ctx, currentThresholds(ctx.window ?? REF_WINDOW), state.cfg.language).ok) {
-      await dropPending($, p, { result: 'preempted', beforePct: p.requestedPct, afterPct: before })
+      const sk = await skillOutcome($, p)
+      await dropPending($, p, { result: 'preempted', beforePct: p.requestedPct, afterPct: before , skills: sk.log })
       state.compacting = false
-      sendContinuation($, p, p.requestedPct, before)
+      sendContinuation($, p, p.requestedPct, before, sk.text)
       return
     }
     $.ui.status(S().statusCompacting)
@@ -1305,14 +1704,16 @@ async function runCompact($: Dollar): Promise<void> {
         ? pctOf({ tokens: tokensAfter, window: ctx.window })
         : pctOf((await $.session.usage()).context)
     const durationMs = (await $.clock.now()) - started
-    await dropPending($, p, { result: 'done', beforePct: before, afterPct: after, durationMs, langSource: p.langSource })
+    await noteCompaction($)
+    const sk = await skillOutcome($, p)
+    await dropPending($, p, { result: 'done', beforePct: before, afterPct: after, durationMs, langSource: p.langSource, skills: sk.log })
     state.lastNudgedTokens = undefined
     state.awaitingPSample = true
     // The old step total is stale; the result's count stands in until the next step.
     state.lastStepTokens = tokensAfter
     state.checkedAt.clear()
     $.ui.toast(S().toastDone(String(before ?? '?'), String(after ?? '?')))
-    sendContinuation($, p, before ?? p.requestedPct, after)
+    sendContinuation($, p, before ?? p.requestedPct, after, sk.text)
   } catch (err) {
     await logLine($, { node: p.h.node, pct: p.requestedPct, result: 'error', reason: errText(err) })
   } finally {
@@ -1440,8 +1841,50 @@ function resetConversation(): void {
   state.lang = undefined
   state.langTurns = 0
   state.driftExpect = undefined
+  state.skills.clear()
+  state.roots.clear()
+  state.reqs = 0
+  state.post = undefined
 }
 
+/** Cwd and home for resolving relative and `~` paths. */
+async function pathEnv($: Dollar): Promise<PathEnv> {
+  if (state.home === undefined) state.home = (await $.env.get('HOME')) || (await $.env.get('USERPROFILE')) || null
+  return { cwd: state.cwd, home: state.home ?? undefined }
+}
+
+/** Probes a skill dir once: it counts only when it holds a SKILL.md (a failed stat is remembered as not a skill). */
+async function probeRoot($: Dollar, prefix: string): Promise<void> {
+  if (state.roots.has(prefix)) return
+  state.roots.set(prefix, await $.fs.stat(`${prefix}SKILL.md`).then(s => s.kind === 'file', () => false))
+}
+
+/** Main-session tool call: learn from a ref read after a compaction, then track skill loads and use. A use under an unprobed skill dir settles off the call path; the queue keeps order. */
+async function trackSkills($: Dollar, e: Record<string, unknown>): Promise<void> {
+  const tool = String(e.tool)
+  const env = await pathEnv($)
+  if (tool === 'Read') {
+    const path = asObj(e.input)?.file_path ?? e.file_path
+    if (typeof path === 'string') await learnRefRead($, path, env)
+  }
+  const nowReq = state.reqs
+  const settle = async (deferred: Deferred[]): Promise<void> => {
+    for (const d of deferred) {
+      await probeRoot($, d.prefix)
+      if (state.roots.get(d.prefix) === true) d.apply()
+    }
+  }
+  const run = (): Deferred[] => trackSkillCall(state.skills, tool, e, nowReq, p => state.roots.get(p), env)
+  const enqueue = (job: () => Promise<void>): void => {
+    state.trackPending++
+    state.trackQueue = state.trackQueue.then(job).catch(() => undefined).finally(() => void state.trackPending--)
+  }
+  if (state.trackPending > 0) enqueue(() => settle(run()))
+  else {
+    const deferred = run()
+    if (deferred.length > 0) enqueue(() => settle(deferred))
+  }
+}
 // ---- autonomous triggers: node nudge, turn-end self-check, topic switch ----
 
 // One self-check per node kind per this much context growth.
@@ -1664,6 +2107,13 @@ export const register: Register = (on, options) => {
     }
     if (r.deny === undefined) {
       try {
+        await trackSkills($, e as unknown as Record<string, unknown>)
+      } catch {
+        // Skill tracking is best effort; never break the call.
+      }
+    }
+    if (r.deny === undefined) {
+      try {
         const line = await onNodeSignal($, e as unknown as Record<string, unknown>, r)
         if (line !== undefined) {
           if (isTextResult(r)) r = { ...r, context: [...(r.context ?? []), line] }
@@ -1681,9 +2131,11 @@ export const register: Register = (on, options) => {
   })
 
   // Auto-compact and /compact shrink the context too; a pre-compaction step total would reopen the gate.
-  on('session.compact', async (_$, e, next) => {
+  on('session.compact', async ($, e, next) => {
     const r = await next(e)
     if (e.agentId === undefined && typeof r.skip !== 'string') {
+      // Our own compaction is noted by runCompact, after the call returns.
+      if (!state.compacting) await noteCompaction($).catch(() => {})
       const after = (r as { tokensAfter?: unknown }).tokensAfter
       state.lastStepTokens = typeof after === 'number' && after > 0 ? after : undefined
       state.awaitingPSample = true
@@ -1692,6 +2144,7 @@ export const register: Register = (on, options) => {
   })
 
   on('turn.step', async function* ($, e, next) {
+    if (e.agentId === undefined) state.reqs++
     const result = yield* next(e)
     if (e.agentId === undefined && result.usage) {
       try {

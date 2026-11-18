@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.7.0 - 2026-11-18
+
+- Added: the skill working set. The engine re-injects every invoked skill's body after a compaction and mods cannot reach that step, so the plugin leaves it alone and keeps what a compaction loses: the reference files a skill read under its dir and the step its procedure had reached. Main-session `Skill` loads and Read, Grep, Glob, Edit, Write or Bash paths under `/skills/<name>/` are tracked per skill (refs: at most 8, newest first; `SKILL.md` is use, not a ref); subagent calls are ignored.
+- Added: optional `compact_now` fields `keep_skills` and `drop_skills` (string arrays; malformed values are ignored). At compaction a skill is hot when kept, used within `hotWindow` main requests, or its learned miss rate is at least 0.3 over 3 or more compactions; done when dropped and not kept.
+- Added: for hot skills a never-trimmed line in the compact instructions (record the step reached and what remains) and a "Skill working set" section in the resume message after the language line and next step: refs of at most `refInlineK` thousand tokens inlined within `skillBudgetK`, the rest listed by path; done skills get a finished line.
+- Added: learning. A main Read of a listed ref within 30 main requests after a compaction is a miss (`skill-ref-miss`), a Read of an inlined ref logs `skill-ref-reread`; `profile.json` gains `skills: { <name>: { compactions, refMisses } }`. `done` and `preempted` rows carry `skills: { hot, done, inlinedK, listed }`.
+- Added: options `hotWindow` (20), `refInlineK` (2), `skillBudgetK` (6).
+
 ## 0.6.0 - 2026-11-18
 
 - Added: `compact_now` takes a required `language` field, `{ chat, outputs[] }`: the conversation language and one verbatim rule per output channel. A missing or malformed value never blocks a compaction. Per field the given value wins, then the rules inherited from the previous compaction, then (for `chat`) the language detected from the last 5 real user messages (CJK >= 30% of non-space characters is Chinese).

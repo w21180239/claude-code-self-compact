@@ -1,6 +1,6 @@
 {
   "name": "self-compact",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "Claude Code plugin that lets Claude compact its own context at task milestones: agent-initiated /compact with self-written handoff instructions, gated by context size, then auto-continue. Smarter auto-compact for long sessions. English and Chinese UI.",
   "author": { "name": "w21180239" },
   "license": "MIT",
@@ -55,6 +55,24 @@
       "title": "Nudge step (%)",
       "description": "Remind again after each further rise of this many percentage points",
       "default": 5
+    },
+    "hotWindow": {
+      "type": "number",
+      "title": "Hot skill window (requests)",
+      "description": "A skill used within this many main requests is hot at compaction: its references ride the resume message. Minimum 1",
+      "default": 20
+    },
+    "refInlineK": {
+      "type": "number",
+      "title": "Inline reference size (k tokens)",
+      "description": "A skill reference of at most this many thousand tokens is inlined into the resume message; larger ones are listed by path. 0 lists every reference",
+      "default": 2
+    },
+    "skillBudgetK": {
+      "type": "number",
+      "title": "Skill reference budget (k tokens)",
+      "description": "Total thousand tokens of inlined skill references per compaction. 0 inlines nothing",
+      "default": 6
     },
     "enabled": {
       "type": "boolean",

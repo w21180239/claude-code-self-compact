@@ -27,6 +27,9 @@ Set through the plugin settings (`userConfig`), for example `claude plugin confi
 | `urgentK` | 350 | urgent tier in thousand tokens, capped at 80% of the window; every other tier is clamped to it (minimum 50), then raised to at least P + 25k |
 | `compactCostK` | 105 | fixed cost of one compaction in thousand tokens (summary plus re-caching); minimum 1 |
 | `nudgeStepPct` | 5 | gap between nudges |
+| `hotWindow` | 20 | a skill used within this many main requests is hot at compaction (minimum 1) |
+| `refInlineK` | 2 | a skill reference of at most this many thousand tokens is inlined into the resume message; 0 lists every ref by path |
+| `skillBudgetK` | 6 | total thousand tokens of inlined skill references per compaction; 0 inlines nothing |
 | `releaseStopHooks` | false | true: a queued compaction ends a turn that another Stop hook (such as /goal) holds open. Only works on personal (non-managed) setups; the built-in guard skips user mods' Stop hooks elsewhere (see FAQ) |
 | `autoNodes` | true | Autonomous triggers: a one-line flag after node-like tool calls (push, merge, PR, tests green, message sent, spec/plan written, todos done), a turn-end self-check, and a hint on every human prompt once the gate is open. false turns all three off |
 | `turnEndCheck` | true | The turn-end self-check only (needs `autoNodes`): after a node, a turn that did real work, or a long uncompacted stretch, one extra turn asks Claude whether to compact |
