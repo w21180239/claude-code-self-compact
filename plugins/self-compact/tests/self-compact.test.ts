@@ -2435,6 +2435,13 @@ test('trackSkillCall: Bash tokens lose trailing punctuation and :line:col suffix
   expect(m.get('voice')?.refs.slice(0, 2)).toEqual([`${SKS}/voice/rel.md`, `${SKS}/voice/h.md`])
 })
 
+test('trackSkillCall: a Bash token ending in `/..` is not trimmed into a use of the skill dir', () => {
+  const m = new Map<string, SkillUse>()
+  track(m, 'Skill', { skill: 'voice' }, 1)
+  track(m, 'Bash', { command: `ls ${SKS}/voice/..` }, 9)
+  expect(m.get('voice')?.lastUse).toBe(1)
+})
+
 test('instructions: the hot-skill line names at most 8 skills and counts the rest', () => {
   const names = Array.from({ length: 11 }, (_, i) => `s${i}`)
   const out = buildInstructions(HANDOFF, [], '/h.md', 'en', undefined, names)

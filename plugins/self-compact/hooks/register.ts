@@ -880,6 +880,7 @@ const PATH_SPLIT = /[\s'"`<>|;&()=]+/
 function cleanToken(t: string): string {
   let cur = t
   for (;;) {
+    if (/(^|\/)\.\.?$/.test(cur)) return cur // keep `.`/`..` segments for normalizePath
     const next = cur.replace(/[,.;:)'"]+$/, '').replace(/:\d+(:\d+)?$/, '')
     if (next === cur) return cur
     cur = next
@@ -1197,7 +1198,7 @@ type State = {
   roots: Map<string, boolean>
   trackQueue: Promise<void>
   trackPending: number
-  home?: string
+  home?: string | null // null: looked up, none set
   post?: PostCompact
 }
 
@@ -1848,8 +1849,8 @@ function resetConversation(): void {
 
 /** Cwd and home for resolving relative and `~` paths. */
 async function pathEnv($: Dollar): Promise<PathEnv> {
-  state.home ??= (await $.env.get('HOME')) || (await $.env.get('USERPROFILE')) || undefined
-  return { cwd: state.cwd, home: state.home }
+  if (state.home === undefined) state.home = (await $.env.get('HOME')) || (await $.env.get('USERPROFILE')) || null
+  return { cwd: state.cwd, home: state.home ?? undefined }
 }
 
 /** Probes a skill dir once: it counts only when it holds a SKILL.md (a failed stat is remembered as not a skill). */
