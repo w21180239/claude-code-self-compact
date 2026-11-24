@@ -1914,12 +1914,17 @@ test('tool description: shows absolute tiers for the current P', async ($, on) =
   expect(d).toContain('350k (35%)')
 })
 
-test('tool description: tiers use the real compaction window', async ($, on) => {
+test('tool description: urgent caps at the auto-compact limit, percent of the model window', async ($, on) => {
   const w = engine(on, { window: 1_000_000, breakdown: { maxTokens: 200_000 } } as never)
   withProject(w, 87_000)
   await start($)
   await modelStep($, w, 65_000)
-  expect((await describeTool($)).description).toContain('160k (80%)')
+  expect((await describeTool($)).description).toContain('160k (16%)')
+})
+
+test('queue: percent matches the status line when autoCompactWindow is below the model window', async ($, on) => {
+  const w = await queued($, on, { tokens: 257_000, window: 1_000_000, breakdown: { maxTokens: 500_000 } } as never)
+  expect(w.log().find(l => l.result === 'queued')).toMatchObject({ pct: 25.7 })
 })
 
 test('configFrom: deprecated keys logged once at start', { options: { minSavingK: 40, urgentPct: 30 } }, async ($, on) => {

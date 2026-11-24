@@ -65,7 +65,7 @@ After that there is nothing to run. Claude decides when to call the tool.
 
 Two layers. The plugin enforces a floor. Claude decides everything above it, guided by the tool description and by nudges.
 
-The plugin derives every threshold from P, the learned post-compact size (see the [cost model](#cost-model)). It refuses a call below the floor, `max(C(floorCalls), floorPct x window)`, where `C(floorCalls)` is the size at which compacting pays back within 20 later calls. With P = 87k the floor is 147k; on a heavy setup it rises with P. Every tier is capped at the urgent size, `min(urgentK x 1k, 80% of the window)`, so a small window still opens the tool. Every tier is then raised to at least `P + 25k`, so a compaction always frees 25k or more and the context cannot re-trip a tier right after it.
+The plugin derives every threshold from P, the learned post-compact size (see the [cost model](#cost-model)). It refuses a call below the floor, `max(C(floorCalls), floorPct x window)`, where `C(floorCalls)` is the size at which compacting pays back within 20 later calls. With P = 87k the floor is 147k; on a heavy setup it rises with P. Every tier is capped at the urgent size, `min(urgentK x 1k, 80% of the auto-compact limit)`, so a small window still opens the tool. Every tier is then raised to at least `P + 25k`, so a compaction always frees 25k or more and the context cannot re-trip a tier right after it.
 
 | Context | Behavior |
 | --- | --- |
@@ -73,7 +73,7 @@ The plugin derives every threshold from P, the learned post-compact size (see th
 | floor to node (`C(10)`) | big phase handoffs only (spec to plan, plan to implementation, MR up to review) |
 | node (`C(10)`) and up | any clean node |
 | node, then every 5% | nudge |
-| urgent (350k or 80% of the window) and up | nudge wording escalates: compact at the next safe step |
+| urgent (350k or 80% of the auto-compact limit) and up | nudge wording escalates: compact at the next safe step |
 
 Nudges ride on the next text tool result, or on the next prompt's context. They are silent while a request is queued or compacting, in subagents, in non-interactive sessions and when disabled.
 
@@ -148,7 +148,7 @@ Set the options through the plugin settings (`userConfig` in `plugin.json`), for
 | `floorCalls` | 20 | floor = the context where compacting pays back within this many later calls (see [cost model](#cost-model)); at least 2 |
 | `nodeCalls` | 10 | node tier: any clean node is allowed from the size that pays back within this many calls |
 | `workCalls` | 8 | work tier: the turn-end self-check treats a work block as a node from this payback size |
-| `urgentK` | 350 | urgent tier in thousand tokens, capped at 80% of the window; every other tier is clamped to it (minimum 50), then raised to at least P + 25k |
+| `urgentK` | 350 | urgent tier in thousand tokens, capped at 80% of the auto-compact limit (`autoCompactWindow`, else the model window); every other tier is clamped to it (minimum 50), then raised to at least P + 25k |
 | `compactCostK` | 105 | fixed cost of one compaction in thousand tokens (summary plus re-caching); minimum 1 |
 | `nudgeStepPct` | 5 | gap between nudges |
 | `hotWindow` | 20 | a skill used within this many main requests is hot at compaction (minimum 1) |

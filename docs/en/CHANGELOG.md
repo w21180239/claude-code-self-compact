@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.7.1 - 2026-11-24
+
+- Fixed: with `autoCompactWindow` set below the model window, every percent (queue, denial, nudges, tool description, log) was of the auto-compact limit, so it read about twice the status line (49.7% vs 26% at 500k on 1M). Percent is now of the model window; the limit only caps the urgent tier.
+
 ## 0.7.0 - 2026-11-18
 
 - Added: the skill working set. The engine re-injects every invoked skill's body after a compaction and mods cannot reach that step, so the plugin leaves it alone and keeps what a compaction loses: the reference files a skill read under its dir and the step its procedure had reached. Main-session `Skill` loads and Read, Grep, Glob, Edit, Write or Bash paths under `/skills/<name>/` are tracked per skill (refs: at most 8, newest first; `SKILL.md` is use, not a ref); subagent calls are ignored.

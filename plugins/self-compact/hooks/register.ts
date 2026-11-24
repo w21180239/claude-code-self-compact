@@ -39,7 +39,8 @@ export const DEFAULTS: Config = {
 // Empty session context, measured on the first main request when unavailable.
 export const DEFAULT_BASELINE = 65_000
 
-export type Usage = { tokens?: number; window?: number }
+// window: the model's context window, the base of every shown percent (as in the status line and /context). limit: where the engine auto-compacts (autoCompactWindow), at most window.
+export type Usage = { tokens?: number; window?: number; limit?: number }
 
 // ---- UI strings ----
 
@@ -425,7 +426,7 @@ export function pctOf(u: Usage): number | undefined {
  * answers with zero usage leaves the engine unable to measure, so it reports no tokens.
  */
 function contextOf(u: Usage): Usage {
-  return { tokens: u.tokens ?? state.lastStepTokens, window: u.window }
+  return { tokens: u.tokens ?? state.lastStepTokens, window: u.window, limit: u.limit }
 }
 
 // ---- thresholds ----
@@ -448,12 +449,12 @@ export type Thresholds = { p: number; window: number; floor: number; node: numbe
 // A compaction must free at least this much, so no tier sits at or below the post-compact size.
 const MIN_GAIN_K = 25
 
-/** Tier sizes in tokens from the post-compact size p: capped at urgent (80% of the window at most), then raised to p + MIN_GAIN_K. */
-export function thresholds(p: number, window: number, cfg: Config): Thresholds {
+/** Tier sizes in tokens from the post-compact size p: capped at urgent (80% of the auto-compact limit at most), then raised to p + MIN_GAIN_K. */
+export function thresholds(p: number, window: number, cfg: Config, limit = window): Thresholds {
   const cost = cfg.compactCostK * 1_000
   const c = (n: number) => callsToTokens(n, p, cost)
   const minTier = p + MIN_GAIN_K * 1_000
-  const urgent = Math.min(cfg.urgentK * 1_000, 0.8 * window)
+  const urgent = Math.min(cfg.urgentK * 1_000, 0.8 * Math.min(limit, window))
   const tier = (v: number) => Math.max(Math.min(v, urgent), minTier)
   return {
     p,
@@ -467,8 +468,8 @@ export function thresholds(p: number, window: number, cfg: Config): Thresholds {
 }
 
 /** Tiers for the current post-compact size p: this session's sample, else the learned profile, else baseline + 25k. */
-export function currentThresholds(window: number): Thresholds {
-  return thresholds(pickP(state.profile, state.cwd ?? '', state.sessionP, state.baseline), window, state.cfg)
+export function currentThresholds(window: number, limit?: number): Thresholds {
+  return thresholds(pickP(state.profile, state.cwd ?? '', state.sessionP, state.baseline), window, state.cfg, limit)
 }
 
 // Window assumed where the engine has not reported one (the tool description at session start).
@@ -1152,6 +1153,8 @@ type State = {
   heavyNoted: boolean
   /** Last window read by usageOf; the describe hook cannot read usage itself (breakdown re-enters it). Survives resets: the window is not per-conversation. */
   window?: number
+  /** Last auto-compact limit read by usageOf (breakdown.maxTokens). */
+  limit?: number
   // Context tokens of the last main-loop request, for when the engine cannot measure.
   lastStepTokens?: number
   seq: number
@@ -1456,7 +1459,7 @@ async function handleCompact($: Dollar, input: Record<string, unknown>, isSub: b
     return deny(S().denyAskedUser, 'asked-user', node)
   }
   const usage = await usageOf($)
-  const g = gate(usage, currentThresholds(usage.window ?? REF_WINDOW), state.cfg.language)
+  const g = gate(usage, currentThresholds(usage.window ?? REF_WINDOW, usage.limit), state.cfg.language)
   if (!g.ok) return deny(g.reason, 'gate', node, g.pct)
 
   const root = await dataRoot($)
@@ -1665,7 +1668,7 @@ async function runCompact($: Dollar): Promise<void> {
     const ctx = await usageOf($)
     const before = pctOf(ctx)
     // Auto-compact got there first: the request is moot, but work still resumes.
-    if (ctx.tokens !== undefined && !gate(ctx, currentThresholds(ctx.window ?? REF_WINDOW), state.cfg.language).ok) {
+    if (ctx.tokens !== undefined && !gate(ctx, currentThresholds(ctx.window ?? REF_WINDOW, ctx.limit), state.cfg.language).ok) {
       const sk = await skillOutcome($, p)
       await dropPending($, p, { result: 'preempted', beforePct: p.requestedPct, afterPct: before , skills: sk.log })
       state.compacting = false
@@ -1728,20 +1731,26 @@ type StepUsage = { input_tokens: number; cache_read_input_tokens: number; cache_
 // The first request of a fresh session carries little more than the opening prompt; a resumed transcript is far longer and would inflate the baseline.
 export const BASELINE_MAX_MESSAGES = 3
 
-/** Context reading against the window the engine compacts at ($.session.usage breakdown.maxTokens, else context.window). */
+/**
+ * Context reading. Percent is of the model window (context.window), matching the status line;
+ * an autoCompactWindow below it (breakdown.maxTokens) only lowers the urgent cap.
+ */
 async function usageOf($: Dollar): Promise<Usage> {
   const { context } = await $.session.usage({ breakdown: 'summary' })
   const max = context.breakdown?.maxTokens
-  const window = typeof max === 'number' && max > 0 ? max : context.window
+  const cap = typeof max === 'number' && max > 0 ? max : undefined
+  const window = context.window || cap
+  const limit = cap !== undefined && window ? Math.min(cap, window) : window
   if (window) state.window = window
-  return contextOf({ tokens: context.tokens, window })
+  if (limit) state.limit = limit
+  return contextOf({ tokens: context.tokens, window, limit })
 }
 
 /** Registers compact_now; the `tool.describe` hook keeps its text current. */
 async function registerTool($: Dollar): Promise<void> {
   await $.tool.register({
     name: TOOL,
-    description: S().description(state.cfg, currentThresholds(state.window ?? REF_WINDOW)),
+    description: S().description(state.cfg, currentThresholds(state.window ?? REF_WINDOW, state.limit)),
     inputSchema: inputSchema(S()),
     isDeferred: false,
   })
@@ -1776,9 +1785,9 @@ async function onMainStep($: Dollar, u: StepUsage, messageCount: number): Promis
   if (state.awaitingPSample) await learnSample($, total)
   if (!state.interactive || !state.cfg.enabled || (await $.env.get('DISABLE_COMPACT')) === '1') return
   if (state.pending !== undefined || state.compacting) return
-  const window = (await usageOf($)).window
+  const { window, limit } = await usageOf($)
   if (!window) return
-  const t = currentThresholds(window)
+  const t = currentThresholds(window, limit)
   if (t.heavy && !state.heavyNoted) {
     state.heavyNoted = true
     state.notes.push(S().heavyHarness(k(t.p)))
@@ -1897,7 +1906,7 @@ async function triggerGate($: Dollar): Promise<{ pct: number; tokens: number; t:
   if ((await $.env.get('DISABLE_COMPACT')) === '1') return undefined
   const u = await usageOf($)
   if (u.tokens === undefined || !u.window) return undefined
-  const t = currentThresholds(u.window)
+  const t = currentThresholds(u.window, u.limit)
   const g = gate(u, t, state.cfg.language)
   if (!g.ok) return undefined
   return { pct: g.pct, tokens: u.tokens, t }
@@ -1991,7 +2000,7 @@ export const register: Register = (on, options) => {
     if (describing) return next(e)
     describing = true
     try {
-      const t = currentThresholds(state.window ?? REF_WINDOW)
+      const t = currentThresholds(state.window ?? REF_WINDOW, state.limit)
       await logLine($, { result: 'tool-describe', p: t.p })
       return { ...(await next(e)), description: S().description(state.cfg, t) }
     } finally {
