@@ -11,7 +11,7 @@ Claude gets a `compact_now` tool. At a clean node (spec written, unit finished, 
 /plugin install self-compact@claude-code-self-compact
 ```
 
-Needs Claude Code 2.1.287 or later. Tuned on 1M-token windows; every threshold derives from the learned post-compact size P and is capped at 80% of the window, so on a small window auto-compact still owns the late stage.
+Needs Claude Code 2.1.287 or later. Tuned on 1M-token windows; every threshold derives from the learned post-compact size P and is capped at 80% of the auto-compact limit, so on a small window auto-compact still owns the late stage.
 
 ## Configuration
 
@@ -24,7 +24,7 @@ Set through the plugin settings (`userConfig`), for example `claude plugin confi
 | `floorCalls` | 20 | floor = the context where compacting pays back within this many later calls (see the cost model in the repository README); at least 2 |
 | `nodeCalls` | 10 | node tier: any clean node is allowed from the size that pays back within this many calls |
 | `workCalls` | 8 | work tier: the turn-end self-check treats a work block as a node from this payback size |
-| `urgentK` | 350 | urgent tier in thousand tokens, capped at 80% of the window; every other tier is clamped to it (minimum 50), then raised to at least P + 25k |
+| `urgentK` | 350 | urgent tier in thousand tokens, capped at 80% of the auto-compact limit (`autoCompactWindow`, else the model window); every other tier is clamped to it (minimum 50), then raised to at least P + 25k |
 | `compactCostK` | 105 | fixed cost of one compaction in thousand tokens (summary plus re-caching); minimum 1 |
 | `nudgeStepPct` | 5 | gap between nudges |
 | `hotWindow` | 20 | a skill used within this many main requests is hot at compaction (minimum 1) |

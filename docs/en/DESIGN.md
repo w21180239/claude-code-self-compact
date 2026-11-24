@@ -64,7 +64,7 @@ The plugin refuses the call when `tokens < floor`. Every tier is derived from P,
 - floor = `max(C(floorCalls), floorPct x window)`, with `floorCalls` 20 and `floorPct` 0 by default
 - node = `C(nodeCalls)`, `nodeCalls` 10
 - work = `C(workCalls)`, `workCalls` 8
-- urgent = `min(urgentK x 1k, 0.8 x window)`, `urgentK` 350
+- urgent = `min(urgentK x 1k, 0.8 x limit)`, `urgentK` 350; limit is the engine's auto-compact point (`autoCompactWindow`, else the window). Every percent shown is of the model window, as in the status line
 
 Floor, node and work are each capped at urgent, so on a small window the tiers collapse toward the urgent size and the tool still opens. After capping, every tier is raised to at least `P + 25k` (`MIN_GAIN_K`), so a compaction always frees 25k or more and the context cannot re-trip a tier right after it. Below the floor the call is denied; from floor to node only a major phase handoff passes; from node any clean node passes; from urgent the nudge says to compact at the next safe step.
 

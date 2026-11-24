@@ -49,7 +49,7 @@ Claude 判断到了节点
 - floor = `max(C(floorCalls), floorPct x window)`，默认 `floorCalls` 20、`floorPct` 0
 - node = `C(nodeCalls)`，`nodeCalls` 10
 - work = `C(workCalls)`，`workCalls` 8
-- urgent = `min(urgentK x 1k, 0.8 x window)`，`urgentK` 350
+- urgent = `min(urgentK x 1k, 0.8 x limit)`，`urgentK` 350；limit 是引擎的自动压缩点（`autoCompactWindow`，未设则为窗口）。显示的百分比都按模型窗口算，与状态栏一致
 
 floor、node、work 都被 urgent 截顶，所以小窗口里各档向紧急档收拢，工具仍能打开。截顶之后每一档再抬到至少 `P + 25k`（`MIN_GAIN_K`），保证一次压缩至少释放 25k，压完不会立刻再触发某一档。低于下限拒绝；下限到节点档只放行大阶段交接；节点档起任何干净节点都可压；紧急档起提醒要求在下一个安全步骤压。
 
