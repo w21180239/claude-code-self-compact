@@ -12,6 +12,7 @@ export type Config = {
   releaseStopHooks: boolean
   autoNodes: boolean
   turnEndCheck: boolean
+  stepAwayCompact: boolean
   language: Lang
   hotWindow: number
   refInlineK: number
@@ -30,6 +31,7 @@ export const DEFAULTS: Config = {
   releaseStopHooks: false,
   autoNodes: true,
   turnEndCheck: true,
+  stepAwayCompact: true,
   language: 'en',
   hotWindow: 20,
   refInlineK: 2,
@@ -41,6 +43,8 @@ export const DEFAULT_BASELINE = 65_000
 
 // window: the model's context window, the base of every shown percent (as in the status line and /context). limit: where the engine auto-compacts (autoCompactWindow), at most window.
 export type Usage = { tokens?: number; window?: number; limit?: number }
+
+export type CacheTtl = '5m' | '1h'
 
 // ---- UI strings ----
 
@@ -70,6 +74,7 @@ type Strings = {
   selfCheck: (kind: NodeKind, pct: number) => string
   selfCheckWork: (pct: number) => string
   selfCheckLong: (pct: number) => string
+  selfCheckAway: (pct: number, mins: number) => string
   topicSwitch: (pct: number) => string
   stopReason: string
   preamble: string
@@ -197,6 +202,10 @@ export const STRINGS: Record<Lang, Strings> = {
       `[self-compact self-check] Context is ${pct}% and has not been compacted; it is past the break-even line: necessary, not sufficient. ${CRIT.en} ` +
       `Compacting does not stop or interrupt the task: work resumes automatically right after, so "don't stop" instructions are no reason to skip. ` +
       `If all three hold, call compact_now now (next: what to do next, or how to answer the user's latest message if nothing remains); otherwise reply with just "skip: <one-line reason>" and end.`,
+    selfCheckAway: (pct, mins) =>
+      `[self-compact self-check] The user has stepped away and the prompt cache expires in about ${mins} min; the next message would re-cache the whole context at the write rate. Context is ${pct}%, past the break-even line: necessary, not sufficient. ${CRIT.en} ` +
+      `Compacting does not stop or interrupt the task: work resumes automatically right after. ` +
+      `If all three hold, call compact_now now (next: how to resume, or a one-line recap of where things stand for the returning user); otherwise reply with just "skip: <one-line reason>" and end.`,
     topicSwitch: pct =>
       `[self-compact] Context ${pct}%, past the break-even line: necessary, not sufficient. ${CRIT.en} ` +
       `If this message opens a new block of work (a different topic, or picking the work up again after a pause) and all three hold, call compact_now first (next: the gist of this request, in its own words) and end the turn; compacting does not stop the task, work resumes automatically right after.`,
@@ -325,6 +334,10 @@ After "Queued", end the turn now: one line, call no more tools.
       `[self-compact 自检] 上下文已到 ${pct}%，一直没有压缩，已过回本线，这是压缩的必要条件而非充分条件。${CRIT.zh}` +
       `压缩不会打断任务，压完会自动接着做。` +
       `三条都满足就现在调用 compact_now（next 写接下来要做的事；没有就写怎么回应用户最新的消息）；否则只回复 skip: <一句理由> 并结束。`,
+    selfCheckAway: (pct, mins) =>
+      `[self-compact 自检] 用户已离开，提示缓存约 ${mins} 分钟后过期，回来后的第一条消息要按写入价重新缓存整个上下文。上下文 ${pct}%，已过回本线，这是压缩的必要条件而非充分条件。${CRIT.zh}` +
+      `压缩不会打断任务，压完会自动接着做。` +
+      `三条都满足就现在调用 compact_now（next 写怎么接着做，或给回来的用户一句话说明进展）；否则只回复 skip: <一句理由> 并结束。`,
     topicSwitch: pct =>
       `[self-compact] 上下文 ${pct}%，已过回本线，这是压缩的必要条件而非充分条件。${CRIT.zh}` +
       `如果这条消息开启一个新工作块（换了话题，或隔了一阵重新接着做）且三条都满足，先调用 compact_now（next 写这条需求的原文要点）再结束本轮；压缩不会打断任务，压完会自动接着做。`,
@@ -543,6 +556,7 @@ export function configFrom(options: Record<string, unknown> | undefined): Config
     releaseStopHooks: rs === true || rs === 'true' || rs === '1',
     autoNodes: flag(o.autoNodes),
     turnEndCheck: flag(o.turnEndCheck),
+    stepAwayCompact: flag(o.stepAwayCompact),
     language: o.language === 'zh' ? 'zh' : 'en',
     hotWindow: Math.max(1, Math.round(num(o.hotWindow, DEFAULTS.hotWindow))),
     refInlineK: Math.max(0, num(o.refInlineK, DEFAULTS.refInlineK)),
@@ -1188,6 +1202,14 @@ type State = {
   awaitingCheck: boolean
   checkTurn: boolean
   checkTimer?: Timer
+  // Step-away: the check being answered is the step-away variant (queued, then running).
+  awaitingAway: boolean
+  checkAway: boolean
+  // Step-away: when the last main request started, the cache lifetime it reported, the armed timer, and whether this idle stretch already fired.
+  lastReqAt?: number
+  cacheTtl?: CacheTtl
+  awayTimer?: Timer
+  awayFired: boolean
   // Language rules of the last compaction request: kept across compactions, cleared with the conversation.
   lang?: LangRules
   // Real user turns still owed the rule line after a compaction.
@@ -1229,6 +1251,9 @@ export const state: State = {
   idleSinceCheck: false,
   awaitingCheck: false,
   checkTurn: false,
+  awaitingAway: false,
+  checkAway: false,
+  awayFired: false,
   langTurns: 0,
   skills: new Map(),
   reqs: 0,
@@ -1726,7 +1751,13 @@ async function runCompact($: Dollar): Promise<void> {
 
 // ---- nudges ----
 
-type StepUsage = { input_tokens: number; cache_read_input_tokens: number; cache_creation_input_tokens: number }
+type StepUsage = {
+  input_tokens: number
+  cache_read_input_tokens: number
+  cache_creation_input_tokens: number
+  ephemeral_5m_input_tokens?: number
+  ephemeral_1h_input_tokens?: number
+}
 
 // The first request of a fresh session carries little more than the opening prompt; a resumed transcript is far longer and would inflate the baseline.
 export const BASELINE_MAX_MESSAGES = 3
@@ -1844,6 +1875,13 @@ function resetConversation(): void {
   state.checkTurn = false
   state.checkTimer?.cancel()
   state.checkTimer = undefined
+  state.awaitingAway = false
+  state.checkAway = false
+  state.lastReqAt = undefined
+  state.cacheTtl = undefined
+  state.awayTimer?.cancel()
+  state.awayTimer = undefined
+  state.awayFired = false
   state.retries = 0
   state.waitingNextTurn = false
   state.finalTry = false
@@ -1972,6 +2010,86 @@ async function fireSelfCheck($: Dollar, key: string, text: string): Promise<void
   void Promise.resolve($.prompt.submit({ text })).catch(() => {})
 }
 
+// ---- step-away: compact while the prompt cache is still warm ----
+
+export const CACHE_TTL_MS: Record<CacheTtl, number> = { '5m': 300_000, '1h': 3_600_000 }
+// Lead before expiry: the self-check turn plus a compaction take about a minute.
+export const STEP_AWAY_MARGIN_MS: Record<CacheTtl, number> = { '5m': 90_000, '1h': 600_000 }
+// Closer than this to expiry, the check cannot land in time.
+export const STEP_AWAY_MIN_LEAD_MS = 30_000
+// Debug aid: env SELF_COMPACT_STEPAWAY_MS replaces the computed delay (ms). $.env.get needs the literal name.
+
+/** Cache lifetime a step's usage reports: the shorter when it wrote both; undefined when it only read. */
+export function ttlFromUsage(u: Pick<StepUsage, 'ephemeral_5m_input_tokens' | 'ephemeral_1h_input_tokens'>): CacheTtl | undefined {
+  if ((u.ephemeral_5m_input_tokens ?? 0) > 0) return '5m'
+  if ((u.ephemeral_1h_input_tokens ?? 0) > 0) return '1h'
+  return undefined
+}
+
+/** Ms from now until the step-away check should fire; undefined when the expiry is too close or already past. */
+export function stepAwayDelay(at: number, ttl: CacheTtl, now: number): number | undefined {
+  const expiry = at + CACHE_TTL_MS[ttl]
+  if (expiry - now < STEP_AWAY_MIN_LEAD_MS) return undefined
+  return Math.max(0, expiry - STEP_AWAY_MARGIN_MS[ttl] - now)
+}
+
+/** Subscription with every rate-limit window under 100%: the only case with a 1h cache. */
+async function subscriptionTtl($: Dollar): Promise<CacheTtl | undefined> {
+  const { rateLimits } = await $.session.usage()
+  const ok = rateLimits.some(l => l.kind === 'five_hour') && rateLimits.every(l => l.kind !== 'spend_limit' && l.percentUsed < 100)
+  return ok ? '1h' : undefined
+}
+
+/** Gate for the step-away check: the autonomous gate, and context at or above the node tier. */
+async function awayGate($: Dollar): Promise<{ pct: number } | undefined> {
+  if (!state.cfg.stepAwayCompact) return undefined
+  const g = await triggerGate($)
+  return g === undefined || g.tokens < g.t.node ? undefined : { pct: g.pct }
+}
+
+function cancelAway(): void {
+  state.awayTimer?.cancel()
+  state.awayTimer = undefined
+}
+
+/** Main turn ended: arm one timer that fires the step-away check shortly before the prompt cache expires. */
+async function armStepAway($: Dollar): Promise<void> {
+  cancelAway()
+  if (!state.cfg.stepAwayCompact || state.awayFired || state.lastTool === 'AskUserQuestion') return
+  if ((await awayGate($)) === undefined) return
+  const override = Number(await $.env.get('SELF_COMPACT_STEPAWAY_MS'))
+  let ms: number | undefined
+  if (Number.isFinite(override) && override > 0) ms = override
+  else {
+    const at = state.lastReqAt
+    const ttl = state.cacheTtl ?? (await subscriptionTtl($))
+    if (at === undefined || ttl === undefined) return
+    ms = stepAwayDelay(at, ttl, await $.clock.now())
+  }
+  if (ms === undefined) return
+  state.awayTimer = $.clock.after(ms, () => {
+    void fireStepAway($)
+  })
+}
+
+async function fireStepAway($: Dollar): Promise<void> {
+  state.awayTimer = undefined
+  if (state.busy || state.pending !== undefined || state.compacting || state.awayFired) return
+  if (state.lastTool === 'AskUserQuestion') return
+  // The context may have shrunk, or the user come back, while the timer ran.
+  const g = await awayGate($)
+  if (g === undefined) return
+  const ttl = state.cacheTtl ?? '1h'
+  const left = state.lastReqAt === undefined ? STEP_AWAY_MARGIN_MS[ttl] : state.lastReqAt + CACHE_TTL_MS[ttl] - (await $.clock.now())
+  const mins = Math.max(1, Math.round(left / 60_000))
+  state.awayFired = true
+  state.awaitingCheck = true
+  state.awaitingAway = true
+  await logLine($, { result: 'step-away', pct: g.pct })
+  // Not awaited: submit resolves only once the next turn starts.
+  void Promise.resolve($.prompt.submit({ text: S().selfCheckAway(g.pct, mins) })).catch(() => {})
+}
+
 /** Hint for a human prompt: a new block of work starts here, compact first if the previous one is closed. */
 async function topicHint($: Dollar): Promise<string | undefined> {
   const g = await triggerGate($)
@@ -2024,9 +2142,12 @@ export const register: Register = (on, options) => {
       state.compactCalled = false
       state.turnToolCalls = 0
       state.checkTurn = state.awaitingCheck
+      state.checkAway = state.awaitingAway
       state.awaitingCheck = false
+      state.awaitingAway = false
       state.checkTimer?.cancel()
       state.checkTimer = undefined
+      cancelAway()
     }
     return next(e)
   })
@@ -2056,11 +2177,13 @@ export const register: Register = (on, options) => {
     }
     if (state.checkTurn) {
       state.checkTurn = false
+      const row = state.checkAway ? 'step-away' : 'self-check'
+      state.checkAway = false
       if (!e.isAborted) {
-        if (state.compactCalled) await logLine($, { result: 'self-check:compacted' })
+        if (state.compactCalled) await logLine($, { result: `${row}:compacted` })
         else {
           const reason = parseSkipReason(e.answer)
-          await logLine($, reason === undefined ? { result: 'self-check:declined' } : { result: 'self-check:declined', reason })
+          await logLine($, reason === undefined ? { result: `${row}:declined` } : { result: `${row}:declined`, reason })
         }
       }
     }
@@ -2070,6 +2193,11 @@ export const register: Register = (on, options) => {
       } catch {
         // The self-check is best effort.
       }
+      try {
+        await armStepAway($)
+      } catch {
+        // Step-away is best effort.
+      }
     }
     return next(e)
   })
@@ -2078,7 +2206,12 @@ export const register: Register = (on, options) => {
     const kind = e.origin?.kind
     const human = kind === 'composer' || kind === 'bridge'
     if (state.pending !== undefined && human) state.pending.nextValid = false
-    if (human) state.awaitingCheck = false
+    if (human) {
+      state.awaitingCheck = false
+      state.awaitingAway = false
+      state.awayFired = false
+    }
+    cancelAway()
     if (e.command !== undefined) return next(e)
     const lines = hasNotes() ? takeNotes() : []
     if (human && state.langTurns > 0) {
@@ -2153,8 +2286,15 @@ export const register: Register = (on, options) => {
   })
 
   on('turn.step', async function* ($, e, next) {
-    if (e.agentId === undefined) state.reqs++
+    const main = e.agentId === undefined
+    if (main) state.reqs++
+    // The cache lifetime counts from the request's start; the engine's main-agent row is not readable from a mod.
+    const sentAt = main ? await $.clock.now() : undefined
     const result = yield* next(e)
+    if (main && result.usage) {
+      state.lastReqAt = sentAt
+      state.cacheTtl = ttlFromUsage(result.usage) ?? state.cacheTtl
+    }
     if (e.agentId === undefined && result.usage) {
       try {
         await onMainStep($, result.usage, e.messageCount ?? 1)

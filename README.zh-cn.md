@@ -109,6 +109,8 @@ claude plugin install self-compact@claude-code-self-compact
 
 `autoNodes` 同时关闭这三项；`turnEndCheck` 只关闭回合末自检。压缩之后一律续接：每次成功压缩都会发送续接 prompt。
 
+**离开时压缩（step-away）。** 你离开期间提示缓存会过期（订阅 1 小时，API key 5 分钟），回来后的第一条消息要按写入价重新缓存整个上下文。一个回合结束时若上下文已到节点档以上，插件从最后一次请求的发出时刻起算，设一个定时器：1 小时缓存提前 10 分钟、5 分钟缓存提前 90 秒。到点时你还没输入、也没有新回合，就用离开版文案提交自检（用户已离开、缓存约 N 分钟后过期；当前块已收尾就压缩，否则回复 `skip: <理由>`），由 Claude 用同样三条标准判断，所以做到一半的审查不会被压缩。每段空闲期最多触发一次（下一条人工输入重置），压缩排队或进行中、`AskUserQuestion` 之后、非交互会话、缓存时长未知时都不触发。日志记 `step-away`，随后是 `step-away:compacted` 或 `step-away:declined`。`stepAwayCompact` 可关闭；调试时环境变量 `SELF_COMPACT_STEPAWAY_MS` 会替换计算出的延迟。
+
 ## 交接单保留什么
 
 `compact_now` 接收结构化的交接单：`node`、`objective`、`standing_orders`（你的规则和授权，用你的原话）、`decisions`（含原因）、`artifacts`、`pending`（每个在跑的任务及回报方式）、`done`、`next`、`language`（见下），以及可选的 `drop` 和 `lessons`（试过不行的做法及原因），以及 `keep_skills` 和 `drop_skills`（skill 名，见下）。缺必填字段时调用被拒绝，并指出缺哪一项。
@@ -157,6 +159,7 @@ P 的来源：每次压缩后的第一个主轮请求是压后大小的真实测
 | `releaseStopHooks` | false | true 时，排队中的压缩可以结束被其他 Stop hook（如 /goal）撑住的回合。仅在个人（非托管）环境有效；其他环境下内置 guard 会跳过用户 mod 的 Stop hook（见 FAQ） |
 | `autoNodes` | true | 自主触发：节点类工具调用（push、merge、PR、测试通过、消息已发、spec/plan 落盘、待办全完成）后附一行标记，回合末自检，门槛已开时每个人工 prompt 带新工作块提示。false 同时关闭这三项 |
 | `turnEndCheck` | true | 仅回合末自检（依赖 `autoNodes`）：出现节点、回合做了实活或长时间未压缩后，多开一个回合问 Claude 是否压缩 |
+| `stepAwayCompact` | true | 离开时压缩（依赖 `autoNodes`）：你让会话空闲时，在提示缓存过期前不久跑一次自检，让压缩发生在缓存还热的时候 |
 | `enabled` | true | false 时工具仍注册，但所有调用被拒绝，也不提醒 |
 
 旧键 `minSavingK`、`nudgeStartPct`、`urgentPct` 仍可传入，但会被忽略；会话开始时插件写一行日志提示。请从设置中删除。
