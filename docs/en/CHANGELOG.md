@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.9.1 - 2026-11-29
+
+- Fixed: the exit check lost to an earlier "do not compact now" from the user: Claude declined and the session exited uncompacted. The check now states that `/exit` is the user's latest instruction and overrides it, with material meant for later questions carried in the handoff.
+
 ## 0.9.0 - 2026-11-29
 
 - Removed: step-away compaction, the option `stepAwayCompact` and the env var `SELF_COMPACT_STEPAWAY_MS`. Claude Code compacts idle 200k+ sessions before the cache expires on its own (`idleCompaction`), so the timer duplicated it.

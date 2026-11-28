@@ -204,6 +204,7 @@ export const STRINGS: Record<Lang, Strings> = {
       `If all three hold, call compact_now now (next: what to do next, or how to answer the user's latest message if nothing remains); otherwise reply with just "skip: <one-line reason>" and end.`,
     selfCheckExit: pct =>
       `[self-compact exit] The user typed /exit and means to resume this session later; context is ${pct}%. Compact now so the resume starts small: call compact_now this turn, no skip. ` +
+      `The /exit is the user's latest instruction: it overrides any earlier request not to compact, and material they meant to ask about goes into the handoff (paths in artifacts, what to reread in next). ` +
       `Unfinished work is fine: list it in pending, and write next as how to pick up when the user returns. The session exits once the compaction ends.`,
     exitCompacting: 'Compacting before exit; the session closes when it ends. /exit again leaves now.',
     exitFailed: 'Compacted, but the exit did not run: type /exit to leave.',
@@ -337,6 +338,7 @@ After "Queued", end the turn now: one line, call no more tools.
       `三条都满足就现在调用 compact_now（next 写接下来要做的事；没有就写怎么回应用户最新的消息）；否则只回复 skip: <一句理由> 并结束。`,
     selfCheckExit: pct =>
       `[self-compact 退出] 用户输入了 /exit，之后还会 resume 这个会话；上下文 ${pct}%。现在压缩，让 resume 时上下文是小的：本轮调用 compact_now，不能 skip。` +
+      `/exit 是用户最新的指令，覆盖之前「先别压缩」之类的要求；用户打算之后再问的材料写进交接单（路径写进 artifacts，需要重读什么写进 next）。` +
       `工作没做完也没关系：写进 pending，next 写用户回来时怎么接着做。压缩结束后会话自动退出。`,
     exitCompacting: '退出前先压缩，压完会话自动关闭。再输一次 /exit 立即退出。',
     exitFailed: '已压缩，但退出没有执行：输入 /exit 退出。',

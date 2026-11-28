@@ -2917,6 +2917,7 @@ test('exit: /exit past the break-even line compacts first, then exits with no co
   expect(w.submits.length).toBe(1)
   expect(w.submits[0].text).toContain('/exit')
   expect(w.submits[0].text).toContain('no skip')
+  expect(w.submits[0].text).toContain('overrides any earlier request not to compact')
   await call($, HANDOFF)
   await turnComplete($, 'x1')
   await w.clock.advance(1_500)
