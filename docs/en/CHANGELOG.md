@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.9.0 - 2026-11-29
+
+- Removed: step-away compaction, the option `stepAwayCompact` and the env var `SELF_COMPACT_STEPAWAY_MS`. Claude Code compacts idle 200k+ sessions before the cache expires on its own (`idleCompaction`), so the timer duplicated it.
+- Added: compaction on `/exit`. `/exit` (or `/quit`) past the break-even line holds the exit, asks Claude for `compact_now` with no skip, and exits once the compaction ends, with no continuation, so a later `claude --resume` starts small. Closing the window and Ctrl+C/Ctrl+D exit untouched. A second `/exit` leaves at once; Esc or a typed message cancels; a declined check or a failed compaction still exits. Option `exitCompact` (true). Log rows `exit-check`, `exit:compacting`, `exit:declined`, `exit:aborted`, `exit:cancelled`, `exit:forced`, `exit`.
+- Fixed: `compact_now` denied a handoff with an empty `artifacts` array; a block that produced no file or link can now compact. `decisions` and `done` stay required.
+
 ## 0.8.0 - 2026-11-28
 
 - Added: step-away compaction. When a main turn ends with the context at or above the node tier, a timer fires the self-check with a step-away text shortly before the prompt cache expires (10 minutes before a 1h cache, 90 seconds before a 5m one), counted from the last main request's start. A typed prompt, a new turn or a session end cancels it; it fires once per idle stretch and never while a compaction is pending, after `AskUserQuestion` or with an unknown cache lifetime. The cache lifetime comes from the step's cache-write usage, else from a subscription with open rate-limit windows (1h). Log rows `step-away`, `step-away:compacted`, `step-away:declined`.

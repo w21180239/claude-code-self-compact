@@ -1,6 +1,6 @@
 {
   "name": "self-compact",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "description": "Claude Code plugin that lets Claude compact its own context at task milestones: agent-initiated /compact with self-written handoff instructions, gated by context size, then auto-continue. Smarter auto-compact for long sessions. English and Chinese UI.",
   "author": { "name": "w21180239" },
   "license": "MIT",
@@ -98,10 +98,10 @@
       "description": "After a node or a long uncompacted stretch, submit one short prompt asking Claude whether to compact. Needs Autonomous node triggers",
       "default": true
     },
-    "stepAwayCompact": {
+    "exitCompact": {
       "type": "boolean",
-      "title": "Step-away compaction",
-      "description": "When you leave the session idle, run the self-check shortly before the prompt cache expires so a compaction happens while the cache is warm and your return is cheap. Needs Autonomous node triggers",
+      "title": "Compact on /exit",
+      "description": "When you leave with /exit and the context is past the break-even line, Claude writes a handoff and compacts first, then the session exits, so a later resume starts small. Closing the window or Ctrl+C exits as usual",
       "default": true
     }
   }
