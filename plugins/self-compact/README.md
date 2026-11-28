@@ -33,6 +33,7 @@ Set through the plugin settings (`userConfig`), for example `claude plugin confi
 | `releaseStopHooks` | false | true: a queued compaction ends a turn that another Stop hook (such as /goal) holds open. Only works on personal (non-managed) setups; the built-in guard skips user mods' Stop hooks elsewhere (see FAQ) |
 | `autoNodes` | true | Autonomous triggers: a one-line flag after node-like tool calls (push, merge, PR, tests green, message sent, spec/plan written, todos done), a turn-end self-check, and a hint on every human prompt once the gate is open. false turns all three off |
 | `turnEndCheck` | true | The turn-end self-check only (needs `autoNodes`): after a node, a turn that did real work, or a long uncompacted stretch, one extra turn asks Claude whether to compact |
+| `stepAwayCompact` | true | Step-away compaction (needs `autoNodes`): when you leave the session idle, run the self-check shortly before the prompt cache expires so the compaction happens while the cache is warm |
 | `enabled` | true | false: the tool stays registered, every call is denied, no nudges |
 
 `DISABLE_COMPACT=1` in the environment also denies every call.

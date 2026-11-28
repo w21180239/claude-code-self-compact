@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.8.0 - 2026-11-28
+
+- Added: step-away compaction. When a main turn ends with the context at or above the node tier, a timer fires the self-check with a step-away text shortly before the prompt cache expires (10 minutes before a 1h cache, 90 seconds before a 5m one), counted from the last main request's start. A typed prompt, a new turn or a session end cancels it; it fires once per idle stretch and never while a compaction is pending, after `AskUserQuestion` or with an unknown cache lifetime. The cache lifetime comes from the step's cache-write usage, else from a subscription with open rate-limit windows (1h). Log rows `step-away`, `step-away:compacted`, `step-away:declined`.
+- Added: option `stepAwayCompact` (true; needs `autoNodes`) and the debugging env var `SELF_COMPACT_STEPAWAY_MS`, which replaces the computed delay.
+
 ## 0.7.1 - 2026-11-24
 
 - Fixed: with `autoCompactWindow` set below the model window, every percent (queue, denial, nudges, tool description, log) was of the auto-compact limit, so it read about twice the status line (49.7% vs 26% at 500k on 1M). Percent is now of the model window; the limit only caps the urgent tier.

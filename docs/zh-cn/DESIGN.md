@@ -181,6 +181,8 @@ floor、node、work 都被 urgent 截顶，所以小窗口里各档向紧急档�
 
 **回合末自检。** 让整个流程全自动的兜底。主会话 `turn.complete` 时（未中止、交互式、门槛通过、无排队请求），按顺序检查：本轮是否出现节点信号；这一轮是否做了实活（主会话至少 `WORK_TURN_MIN_CALLS = 2` 次工具调用）且上下文不低于实活档 `C(workCalls)`；或上下文已到节点档以上仍未压缩。强节点信号要求到下限，弱信号要求到节点档。只有 `AskUserQuestion` 会抑制自检，末尾问号不会：收尾总结常常带问句，历史里的压缩正落在这些点上。每个触发点每涨 5 个百分点最多自检一次，两次自检之间没有工具活动则不连续自检。经过常规 1.5 秒防抖并空闲后，插件提交一条 prompt：阶段已收尾就调用 `compact_now`（若之后没有可自动继续的工作，`next` 写怎么处理用户最新一条消息，或一句收尾小结），否则回复 `skip: <一句理由>`。阈值只是必要条件：过线后三条都满足才压：（1）当前块已收尾；（2）接下来的工作不依赖上下文里的大段原文（正在逐行对照的 diff、刚读的长文件）；（3）剩余工作还够长，值得压一次。紧急档的提醒只保留第 1 条否决权。日志记录 `self-check`，下一个回合再记 `self-check:compacted` 或 `self-check:declined`；declined 行带 `reason`（`skip:` 之后的文字，截断到 200 字符；单独的 skip 没有 reason）。`turnEndCheck=false` 只关闭这一项。
 
+**离开时压缩（step-away）。** 空闲 1 到 13 小时会让提示缓存过期（订阅 1 小时，API key 5 分钟），回来后的第一次请求要按写入价重新缓存整个上下文；调长 TTL 无济于事。引擎里主 agent 那一行（`lastRequest`、`cacheTtl`）mod 读不到（`$.agent.list()` 只含子代理和队友），所以 mod 自己测同样两件事：每个主 `turn.step` 之前的 `$.clock.now()`（请求发出时刻，缓存寿命从这里起算），以及 step `usage` 报的寿命（`ephemeral_5m_input_tokens` > 0 为 5m，两者都有取短的；否则 `ephemeral_1h_input_tokens` > 0 为 1h）。没报写入就用上次已知的寿命，再不行就看是否订阅且所有速率窗口都低于 100%（视为 1h），否则什么也不做。主 `turn.complete` 时（未中止、门槛通过、上下文在节点档以上、没有 `AskUserQuestion`）设一个 `$.clock.after` 定时器，到 `发出时刻 + ttl - margin`（1h 提前 10 分钟，5m 提前 90 秒；缓存剩余不足 30 秒则不设）。任何 `prompt.submit`、任何主 `turn.start`、会话结束都会取消它。到点后重新检查门槛（不忙、无排队或进行中的压缩、上下文仍在节点档以上），经自检通道提交 `selfCheckAway`：同样三条标准，文案是“用户已离开，缓存约 N 分钟后过期”，所以做到一半的 diff 审查会回复 `skip: <理由>`。每段空闲期最多触发一次，人工输入（composer 或 bridge）开启下一段。检查回合有自己的标记，日志依次是 `step-away`，然后 `step-away:compacted` 或 `step-away:declined`。环境变量 `SELF_COMPACT_STEPAWAY_MS` 替换计算出的延迟（实测时不用等一小时）。`stepAwayCompact=false` 关闭。会给缓存发保活 ping 的 mod（如 cache warmer）会让时机失效：缓存在计算的过期点之后仍然热，压缩比需要的早，代价只是一次压缩。
+
 **新工作块提示。** 人工输入（composer 或 bridge）的 prompt，只要门槛通过且无排队请求，就给模型加一行：若这条消息开启新工作块（换话题，或停顿后重新接着做）且上一块已收尾，先调用 `compact_now`，`next` 写这条需求的要点。只看换话题会漏掉停顿场景：历史里大量 `/compact` 是在一块工作收尾之后、下一条指令之前手动敲的。
 
 每次成功压缩都以续接 prompt 收尾，无论是在阶段结束时请求，还是在对话中途请求，工作总会继续。
@@ -191,7 +193,7 @@ floor、node、work 都被 urgent 截顶，所以小窗口里各档向紧急档�
 
 超过约 2 MB 时，`log.jsonl` 会移到 `log.1.jsonl`，另起新文件；读不出来的日志原样保留，不会被覆盖。
 
-`log.jsonl` 每次请求一行 JSON：`ts`、`session`、`node`、`pct`（请求时占比）、`result`（`queued`、`denied:<原因>`、`done`、`preempted`、`aborted`、`stale`、`failed`、`error`、`p-sample`、`deprecated`、`tool-describe`、`self-check`、`self-check:compacted`、`self-check:declined`、`lang-drift`、`skill-ref-miss`、`skill-ref-reread`）、可选的 `reason`（`self-check:declined` 上是模型给出的跳过原因，最多 200 字符）、可选的 `pSample` 和 `p`、`langSource`（`queued`、`done`）、`expected` 和 `got`（`lang-drift`）、`beforePct`、`afterPct`、`durationMs`。
+`log.jsonl` 每次请求一行 JSON：`ts`、`session`、`node`、`pct`（请求时占比）、`result`（`queued`、`denied:<原因>`、`done`、`preempted`、`aborted`、`stale`、`failed`、`error`、`p-sample`、`deprecated`、`tool-describe`、`self-check`、`self-check:compacted`、`self-check:declined`、`step-away`、`step-away:compacted`、`step-away:declined`、`lang-drift`、`skill-ref-miss`、`skill-ref-reread`）、可选的 `reason`（`self-check:declined` 上是模型给出的跳过原因，最多 200 字符）、可选的 `pSample` 和 `p`、`langSource`（`queued`、`done`）、`expected` 和 `got`（`lang-drift`）、`beforePct`、`afterPct`、`durationMs`。
 
 ## 语言
 

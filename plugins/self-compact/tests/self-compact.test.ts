@@ -3,6 +3,8 @@ import type { TestBody } from 'claude-code/testing'
 import {
   DEFAULTS,
   STRINGS,
+  stepAwayDelay,
+  ttlFromUsage,
   callsToTokens,
   learnP,
   pickP,
@@ -309,10 +311,11 @@ function engine(
   on('session.id', () => ({ value: 'sess1' }))
   const fail = { usage: false, invalidate: false }
   const usageCalls: unknown[] = []
+  const limits: { kind: string; percentUsed: number }[] = []
   on('session.usage', async (_, e) => {
     usageCalls.push(e)
     if (fail.usage) throw new Error('usage unsupported')
-    return { value: { startedAt: 0, context: usage, rateLimits: [] } }
+    return { value: { startedAt: 0, context: usage, rateLimits: limits } }
   })
   on('session.messages', () => ({ value: messages }))
   on('tool.register', (_, e) => {
@@ -377,7 +380,7 @@ function engine(
     return { messages: [{ role: 'user', text: 'summary', toolUses: [] }], tokensAfter: wait.reportAfter }
   })
   // What each model request reports as its context size, and what the user's Stop hooks answer.
-  const step = { total: 65_000, index: 0 }
+  const step = { total: 65_000, index: 0, ephemeral: {} as { ephemeral_5m_input_tokens?: number; ephemeral_1h_input_tokens?: number } }
   const stopAnswer: { block?: string } = {}
   on('turn.step', async function* (_, e) {
     step.index++
@@ -386,6 +389,7 @@ function engine(
       output_tokens: 10,
       cache_read_input_tokens: step.total - 1_000,
       cache_creation_input_tokens: 0,
+      ...step.ephemeral,
       model: 'm',
     }
     return { turnId: e.turnId, index: e.index, answer: '', toolUses: [], stopReason: 'end_turn', usage }
@@ -405,7 +409,7 @@ function engine(
       .split('\n')
       .filter(Boolean)
       .map(l => JSON.parse(l) as { result: string; session: string; node?: string; pct?: number; reason?: string; beforePct?: number; afterPct?: number; durationMs?: number })
-  return { describeHook, usageCalls, clock, files, registered, invalidated, statuses, handoffs, log, usage, compactPlan, compactCalls, toasts, submits, wait, step, stopAnswer, fsFlags, reads, links, messages, fail }
+  return { limits, describeHook, usageCalls, clock, files, registered, invalidated, statuses, handoffs, log, usage, compactPlan, compactCalls, toasts, submits, wait, step, stopAnswer, fsFlags, reads, links, messages, fail }
 }
 
 const start = ($: Dollar, isInteractive = true) =>
@@ -2878,4 +2882,267 @@ test('skills: a ref linked into another skills/<short>/ dir is listed, not read'
   expect(w.reads).toEqual([])
   expect(w.submits[0].text).not.toContain('OTHER_BODY')
   expect(w.submits[0].text).toContain(`${SKS}/voice/evil.md`)
+})
+
+// ---- step-away: compact while the prompt cache is warm ----
+
+const HOUR = 3_600_000
+const AWAY_USAGE = { tokens: 310_000, window: 1_000_000 }
+const testAway = (name: string, body: TestBody, options: Record<string, unknown> = {}) =>
+  test(name, { options: { language: 'en', turnEndCheck: false, ...options } }, body)
+const awayRows = (w: W) => w.log().filter(l => l.result.startsWith('step-away'))
+
+/** A request at 310k; the first one of a session is a small one, which the plugin takes as the empty-context baseline. */
+async function bigStep($: Dollar, w: W) {
+  if (w.step.index === 0) await modelStep($, w, 65_000)
+  await modelStep($, w, 310_000)
+}
+
+/** A main turn whose last request reports a cache write of the given lifetime. */
+async function awayTurn($: Dollar, w: W, ttl: '5m' | '1h' | null = '1h', id = 't1') {
+  w.step.ephemeral = ttl === '1h' ? { ephemeral_1h_input_tokens: 5_000 } : ttl === '5m' ? { ephemeral_5m_input_tokens: 5_000 } : {}
+  await turnStart($, id)
+  await bigStep($, w)
+  await turnComplete($, id)
+}
+
+test('step-away: pure helpers', () => {
+  expect(ttlFromUsage({ ephemeral_5m_input_tokens: 10, ephemeral_1h_input_tokens: 10 })).toBe('5m')
+  expect(ttlFromUsage({ ephemeral_1h_input_tokens: 10 })).toBe('1h')
+  expect(ttlFromUsage({})).toBeUndefined()
+  expect(stepAwayDelay(1_000, '1h', 1_000)).toBe(HOUR - 600_000)
+  expect(stepAwayDelay(1_000, '5m', 1_000)).toBe(300_000 - 90_000)
+  expect(stepAwayDelay(0, '5m', 300_000 - 29_999)).toBeUndefined()
+  expect(stepAwayDelay(0, '5m', 300_000 - 30_000)).toBe(0)
+  expect(configFrom({}).stepAwayCompact).toBe(true)
+  expect(configFrom({ stepAwayCompact: false }).stepAwayCompact).toBe(false)
+})
+
+test('step-away: strings carry the criteria and the skip reply in both languages', () => {
+  const en = STRINGS.en.selfCheckAway(31, 9)
+  expectEnCriteria(en)
+  expect(en).toContain('expires in about 9 min')
+  expect(en).toContain('skip: <one-line reason>')
+  const zh = STRINGS.zh.selfCheckAway(31, 9)
+  expectZhCriteria(zh)
+  expect(zh).toContain('9 分钟')
+  expect(zh).toContain('skip: <一句理由>')
+})
+
+testAway('step-away: a 1h cache arms at turn end and fires 10 min before expiry', async ($, on) => {
+  const w = engine(on, AWAY_USAGE)
+  await start($)
+  await awayTurn($, w, '1h')
+  await w.clock.advance(HOUR - 600_000 - 1)
+  expect(w.submits).toEqual([])
+  await w.clock.advance(1)
+  expect(w.submits.length).toBe(1)
+  expect(w.submits[0].text).toContain('stepped away')
+  expect(w.submits[0].text).toContain('expires in about 10 min')
+  expect(w.submits[0].text).toContain('31%')
+  expect(awayRows(w).map(l => l.result)).toEqual(['step-away'])
+})
+
+testAway('step-away: a 5m cache fires 90 s before expiry', async ($, on) => {
+  const w = engine(on, AWAY_USAGE)
+  await start($)
+  await awayTurn($, w, '5m')
+  await w.clock.advance(210_000 - 1)
+  expect(w.submits).toEqual([])
+  await w.clock.advance(1)
+  expect(w.submits.length).toBe(1)
+  expect(w.submits[0].text).toContain('expires in about 2 min')
+})
+
+testAway('step-away: the delay counts from the request start, not the turn end', async ($, on) => {
+  const w = engine(on, AWAY_USAGE)
+  await start($)
+  w.step.ephemeral = { ephemeral_5m_input_tokens: 5_000 }
+  await turnStart($, 't1')
+  await bigStep($, w)
+  await w.clock.advance(60_000) // the turn goes on after its last request
+  await turnComplete($, 't1')
+  await w.clock.advance(150_000 - 1)
+  expect(w.submits).toEqual([])
+  await w.clock.advance(1)
+  expect(w.submits.length).toBe(1)
+})
+
+testAway('step-away: a user prompt cancels the timer', async ($, on) => {
+  const w = engine(on, AWAY_USAGE)
+  await start($)
+  await awayTurn($, w, '1h')
+  await w.clock.advance(HOUR - 700_000)
+  await userPrompt($, 'back')
+  await w.clock.advance(HOUR)
+  expect(w.submits.filter(s => s.text.includes('stepped away'))).toEqual([])
+})
+
+testAway('step-away: a new turn cancels the timer and the next turn end re-arms it', async ($, on) => {
+  const w = engine(on, AWAY_USAGE)
+  await start($)
+  await awayTurn($, w, '1h')
+  await w.clock.advance(HOUR - 700_000)
+  await turnStart($, 't2')
+  await bigStep($, w)
+  await w.clock.advance(200_000) // past the first timer's fire time
+  expect(w.submits).toEqual([])
+  await turnComplete($, 't2')
+  await w.clock.advance(HOUR - 600_000 - 200_000)
+  expect(w.submits.length).toBe(1)
+})
+
+testAway('step-away: no fire under the node tier', async ($, on) => {
+  const w = engine(on, { tokens: 150_000, window: 1_000_000 })
+  await start($)
+  await awayTurn($, w, '1h')
+  await w.clock.advance(2 * HOUR)
+  expect(w.submits).toEqual([])
+})
+
+testAway('step-away: no fire when the cache lifetime is unknown', async ($, on) => {
+  const w = engine(on, AWAY_USAGE)
+  await start($)
+  await awayTurn($, w, null)
+  await w.clock.advance(2 * HOUR)
+  expect(w.submits).toEqual([])
+})
+
+testAway('step-away: a subscription with room left in every window implies a 1h cache', async ($, on) => {
+  const w = engine(on, AWAY_USAGE)
+  w.limits.push({ kind: 'five_hour', percentUsed: 10 }, { kind: 'seven_day', percentUsed: 50 })
+  await start($)
+  await awayTurn($, w, null)
+  await w.clock.advance(HOUR - 600_000)
+  expect(w.submits.length).toBe(1)
+})
+
+testAway('step-away: a full rate-limit window drops the 1h assumption', async ($, on) => {
+  const w = engine(on, AWAY_USAGE)
+  w.limits.push({ kind: 'five_hour', percentUsed: 100 })
+  await start($)
+  await awayTurn($, w, null)
+  await w.clock.advance(2 * HOUR)
+  expect(w.submits).toEqual([])
+})
+
+testAway('step-away: fires once per idle stretch, again after the next typed prompt', async ($, on) => {
+  const w = engine(on, AWAY_USAGE)
+  await start($)
+  await awayTurn($, w, '1h')
+  await w.clock.advance(HOUR - 600_000)
+  expect(w.submits.length).toBe(1)
+  // The check turn declines; the stretch is still the same one.
+  await turnStart($, 't2')
+  await turnComplete($, 't2', false, 'skip: mid-review')
+  await w.clock.advance(3 * HOUR)
+  expect(w.submits.length).toBe(1)
+  // The user returns and leaves again.
+  await userPrompt($, 'back')
+  await awayTurn($, w, '1h', 't3')
+  await w.clock.advance(HOUR - 600_000)
+  expect(w.submits.filter(s => s.text.includes('stepped away')).length).toBe(2)
+})
+
+testAway('step-away: logs compacted and declined with the reason', async ($, on) => {
+  const w = engine(on, AWAY_USAGE)
+  await start($)
+  await awayTurn($, w, '1h')
+  await w.clock.advance(HOUR - 600_000)
+  await turnStart($, 't2')
+  await turnComplete($, 't2', false, 'skip: half-done diff review')
+  const declined = w.log().find(l => l.result === 'step-away:declined')
+  expect(declined?.reason).toBe('half-done diff review')
+  expect(w.log().some(l => l.result.startsWith('self-check'))).toBe(false)
+
+  await userPrompt($, 'back')
+  await awayTurn($, w, '1h', 't3')
+  await w.clock.advance(HOUR - 600_000)
+  await turnStart($, 't4')
+  await call($, HANDOFF)
+  await turnComplete($, 't4')
+  expect(awayRows(w).map(l => l.result)).toEqual(['step-away', 'step-away:declined', 'step-away', 'step-away:compacted'])
+})
+
+testAway('step-away: not armed while a compaction is queued', async ($, on) => {
+  const w = engine(on, AWAY_USAGE)
+  w.wait.afterTokens = 300_000 // still above the node tier once it ran
+  await start($)
+  w.step.ephemeral = { ephemeral_1h_input_tokens: 5_000 }
+  await turnStart($, 't1')
+  await bigStep($, w)
+  await call($, HANDOFF)
+  await turnComplete($, 't1')
+  await w.clock.advance(2 * HOUR)
+  expect(awayRows(w)).toEqual([])
+})
+
+testAway('step-away: skipped after AskUserQuestion', async ($, on) => {
+  const w = engine(on, AWAY_USAGE)
+  await start($)
+  w.step.ephemeral = { ephemeral_1h_input_tokens: 5_000 }
+  await turnStart($, 't1')
+  await bigStep($, w)
+  await $.tool.call({ tool: 'AskUserQuestion', questions: [] } as never)
+  await turnComplete($, 't1')
+  await w.clock.advance(2 * HOUR)
+  expect(w.submits).toEqual([])
+})
+
+testAway('step-away: skipped for an aborted turn', async ($, on) => {
+  const w = engine(on, AWAY_USAGE)
+  await start($)
+  w.step.ephemeral = { ephemeral_1h_input_tokens: 5_000 }
+  await turnStart($, 't1')
+  await bigStep($, w)
+  await turnComplete($, 't1', true)
+  await w.clock.advance(2 * HOUR)
+  expect(w.submits).toEqual([])
+})
+
+testAway('step-away: a compaction that shrank the context below the tier skips the fire', async ($, on) => {
+  const w = engine(on, AWAY_USAGE)
+  await start($)
+  await awayTurn($, w, '1h')
+  w.usage.tokens = 100_000 // auto-compact while idle
+  await w.clock.advance(2 * HOUR)
+  expect(w.submits).toEqual([])
+})
+
+testAway('step-away: stepAwayCompact=false disables it', async ($, on) => {
+  const w = engine(on, AWAY_USAGE)
+  await start($)
+  await awayTurn($, w, '1h')
+  await w.clock.advance(2 * HOUR)
+  expect(w.submits).toEqual([])
+}, { stepAwayCompact: false })
+
+testAway('step-away: a non-interactive session never fires', async ($, on) => {
+  const w = engine(on, AWAY_USAGE)
+  await start($, false)
+  await awayTurn($, w, '1h')
+  await w.clock.advance(2 * HOUR)
+  expect(w.submits).toEqual([])
+})
+
+testAway('step-away: the debug env var replaces the computed delay', async ($, on) => {
+  const w = engine(on, AWAY_USAGE, { SELF_COMPACT_STEPAWAY_MS: '60000' })
+  await start($)
+  await awayTurn($, w, null) // no cache lifetime needed
+  await w.clock.advance(59_999)
+  expect(w.submits).toEqual([])
+  await w.clock.advance(1)
+  expect(w.submits.length).toBe(1)
+})
+
+testAway('step-away: the self-check turn is a turn of its own, so its end does not re-fire', async ($, on) => {
+  const w = engine(on, AWAY_USAGE)
+  await start($)
+  await awayTurn($, w, '1h')
+  await w.clock.advance(HOUR - 600_000)
+  await turnStart($, 't2')
+  await bigStep($, w)
+  await turnComplete($, 't2', false, 'skip: busy')
+  await w.clock.advance(5 * HOUR)
+  expect(w.submits.length).toBe(1)
 })
