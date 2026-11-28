@@ -73,6 +73,7 @@ type Strings = {
   selfCheckWork: (pct: number) => string
   selfCheckLong: (pct: number) => string
   selfCheckExit: (pct: number) => string
+  exitInstructions: (lang: string | undefined) => string
   exitCompacting: string
   exitFailed: string
   topicSwitch: (pct: number) => string
@@ -203,9 +204,13 @@ export const STRINGS: Record<Lang, Strings> = {
       `Compacting does not stop or interrupt the task: work resumes automatically right after, so "don't stop" instructions are no reason to skip. ` +
       `If all three hold, call compact_now now (next: what to do next, or how to answer the user's latest message if nothing remains); otherwise reply with just "skip: <one-line reason>" and end.`,
     selfCheckExit: pct =>
-      `[self-compact exit] The user typed /exit and means to resume this session later; context is ${pct}%. Compact now so the resume starts small: call compact_now this turn, no skip. ` +
-      `The /exit is the user's latest instruction: it overrides any earlier request not to compact, and material they meant to ask about goes into the handoff (paths in artifacts, what to reread in next). ` +
-      `Unfinished work is fine: list it in pending, and write next as how to pick up when the user returns. The session exits once the compaction ends.`,
+      `[self-compact exit] The user typed /exit; context is ${pct}%. This plugin compacts on /exit (the user's setting) so a later resume starts small, then the session exits. ` +
+      `Call compact_now this turn with the handoff for the resume: unfinished work in pending, files the user may ask about in artifacts, next as how to pick up (including what to reread). ` +
+      `If you skip, the plugin compacts anyway with a generic summary, which keeps less than your handoff.`,
+    exitInstructions: lang =>
+      'The user ended the session with /exit and will resume it later. Write the summary for that resume: ' +
+      'keep the user\'s instructions and preferences verbatim; list open items and unanswered questions; copy file paths, commands, error strings, numbers and IDs exactly; ' +
+      `end with "Next step": where the work stands and how to pick it up.${lang === undefined ? '' : ` ${lang}`}`,
     exitCompacting: 'Compacting before exit; the session closes when it ends. /exit again leaves now.',
     exitFailed: 'Compacted, but the exit did not run: type /exit to leave.',
     topicSwitch: pct =>
@@ -337,9 +342,13 @@ After "Queued", end the turn now: one line, call no more tools.
       `压缩不会打断任务，压完会自动接着做。` +
       `三条都满足就现在调用 compact_now（next 写接下来要做的事；没有就写怎么回应用户最新的消息）；否则只回复 skip: <一句理由> 并结束。`,
     selfCheckExit: pct =>
-      `[self-compact 退出] 用户输入了 /exit，之后还会 resume 这个会话；上下文 ${pct}%。现在压缩，让 resume 时上下文是小的：本轮调用 compact_now，不能 skip。` +
-      `/exit 是用户最新的指令，覆盖之前「先别压缩」之类的要求；用户打算之后再问的材料写进交接单（路径写进 artifacts，需要重读什么写进 next）。` +
-      `工作没做完也没关系：写进 pending，next 写用户回来时怎么接着做。压缩结束后会话自动退出。`,
+      `[self-compact 退出] 用户输入了 /exit；上下文 ${pct}%。本插件在 /exit 时压缩（用户的设置），让之后 resume 从小上下文开始，压完会话退出。` +
+      `本轮调用 compact_now，写好给 resume 用的交接单：没做完的工作写进 pending，用户可能会问的文件写进 artifacts，next 写回来时怎么接着做（包括要重读什么）。` +
+      `如果 skip，插件仍会用通用摘要压缩，保留的内容比你的交接单少。`,
+    exitInstructions: lang =>
+      '用户用 /exit 结束了会话，之后会 resume。为那次 resume 写摘要：' +
+      '用户的指令和偏好原话保留；列出未完成的事项和没答的问题；文件路径、命令、报错原文、数字和 ID 原样照抄；' +
+      `以「下一步」结尾：工作做到哪一步、回来时怎么接着做。${lang === undefined ? '' : ` ${lang}`}`,
     exitCompacting: '退出前先压缩，压完会话自动关闭。再输一次 /exit 立即退出。',
     exitFailed: '已压缩，但退出没有执行：输入 /exit 退出。',
     topicSwitch: pct =>
@@ -1595,6 +1604,49 @@ async function giveUp($: Dollar, p: Pending, reason: string): Promise<void> {
   else state.notes.push(S().noteFailed(reason))
 }
 
+/** The exit check queued nothing (skipped or denied): the /exit is the user's own, so compact with generic instructions, then exit. */
+function compactThenExit($: Dollar): void {
+  $.clock.after(IDLE_DEBOUNCE_MS, () => {
+    void exitCompact($).catch(async err => {
+      await logLine($, { result: 'exit:failed', reason: errText(err) })
+      if (state.exitAfter) runExit($)
+    })
+  })
+}
+
+async function exitCompact($: Dollar): Promise<void> {
+  // A typed message cancelled the exit, or a turn is running.
+  if (!state.exitAfter || state.busy || state.compacting) return
+  const before = pctOf(await usageOf($))
+  let failure: string | undefined
+  let tokensAfter: number | undefined
+  state.compacting = true
+  $.ui.status(S().statusCompacting)
+  try {
+    const r = await $.session.compact({ instructions: S().exitInstructions(langLine(state.lang, state.cfg.language)) })
+    if (typeof r.skip === 'string') failure = r.skip
+    else tokensAfter = r.tokensAfter
+  } catch (err) {
+    failure = errText(err)
+  } finally {
+    state.compacting = false
+    $.ui.status(undefined)
+  }
+  if (failure !== undefined && ABORTED.test(failure)) {
+    state.exitAfter = false
+    await logLine($, { result: 'exit:aborted', reason: failure })
+    return
+  }
+  if (failure !== undefined) await logLine($, { result: 'exit:failed', reason: failure })
+  else {
+    const after = tokensAfter !== undefined && state.window ? pctOf({ tokens: tokensAfter, window: state.window }) : pctOf((await $.session.usage()).context)
+    await noteCompaction($)
+    await logLine($, { result: 'exit:direct', beforePct: before, afterPct: after })
+    $.ui.toast(S().toastDone(String(before ?? '?'), String(after ?? '?')))
+  }
+  if (state.exitAfter) runExit($)
+}
+
 /** Runs the /exit held back for a compaction, from a timer: `$.command.run` rejects inside a hook the turn waits on. */
 function runExit($: Dollar): void {
   state.exitAfter = false
@@ -2131,9 +2183,9 @@ export const register: Register = (on, options) => {
         await logLine($, { result: 'exit:aborted' })
       } else if (state.pending !== undefined) await logLine($, { result: 'exit:compacting' })
       else {
-        // No compaction queued (declined or denied): leave as asked.
+        // No compaction queued (declined or denied): the plugin compacts itself, then leaves.
         await logLine($, { result: 'exit:declined' })
-        if (state.exitAfter) runExit($)
+        if (state.exitAfter) compactThenExit($)
       }
     }
     if (!e.isAborted && !state.exitAfter) {
@@ -2169,7 +2221,7 @@ export const register: Register = (on, options) => {
     $.clock.after(0, () => {
       void Promise.resolve($.prompt.submit({ text })).catch(() => {
         state.awaitingExit = false
-        runExit($)
+        compactThenExit($)
       })
     })
     return { text: S().exitCompacting, isTextDisplayOnly: true }

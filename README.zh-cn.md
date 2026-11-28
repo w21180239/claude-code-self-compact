@@ -109,7 +109,7 @@ claude plugin install self-compact@claude-code-self-compact
 
 `autoNodes` 同时关闭这三项；`turnEndCheck` 只关闭回合末自检。压缩之后一律续接：除退出前的那次以外，每次成功压缩都会发送续接 prompt。
 
-**`/exit` 时压缩。** 输入 `/exit`（或 `/quit`）表示你之后还会回到这个会话。上下文已过回本线时，插件先拦下退出，让 Claude 调用 `compact_now`（不能 skip；没做完的工作写进 `pending`，`next` 写回来时怎么接着做），压缩结束后再执行 `/exit`。之后 `claude --resume` 从压缩后的小摘要开始。直接关窗口或按 Ctrl+C/Ctrl+D 会立即退出，不受影响。等待期间再输一次 `/exit` 立即退出；按 Esc 或输入新消息则取消退出。Claude 拒绝或压缩失败时照样退出。日志依次记 `exit-check`、`exit:compacting` / `exit:declined` / `exit:aborted` / `exit:cancelled` / `exit:forced`、`exit`。`exitCompact` 可关闭。
+**`/exit` 时压缩。** 输入 `/exit`（或 `/quit`）表示你之后还会回到这个会话。上下文已过回本线时，插件先拦下退出，让 Claude 调用 `compact_now`，写好给 resume 用的交接单（没做完的工作写进 `pending`，`next` 写回来时怎么接着做），压缩结束后再执行 `/exit`。如果 Claude skip（它可能把之前的「先别压缩」排在插件请求之前）或调用被拒绝，插件会用通用的 resume 摘要指令照样压缩，因为 `/exit` 本身是你的操作。之后 `claude --resume` 从压缩后的小摘要开始。直接关窗口或按 Ctrl+C/Ctrl+D 会立即退出，不受影响。等待期间再输一次 `/exit` 立即退出；按 Esc 或输入新消息则取消退出。压缩失败时照样退出。日志依次记 `exit-check`，然后是 `exit:compacting` 或 `exit:declined` + `exit:direct`、`exit:aborted`、`exit:cancelled`、`exit:forced`、`exit:failed`，最后是 `exit`。`exitCompact` 可关闭。
 
 ## 交接单保留什么
 
