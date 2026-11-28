@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.9.2 - 2026-11-29
+
+- Fixed: `/exit` could still leave uncompacted. With an earlier "do not compact now", the model also declined the 0.9.1 check, reading its "overrides" line as the plugin speaking for the user. The check no longer argues: it says a skip still compacts. On a skip, a denied call or a failed submit, the plugin calls `$.session.compact` itself with generic resume instructions, then exits. Log rows `exit:direct`, `exit:failed`.
+
 ## 0.9.1 - 2026-11-29
 
 - Fixed: the exit check lost to an earlier "do not compact now" from the user: Claude declined and the session exited uncompacted. The check now states that `/exit` is the user's latest instruction and overrides it, with material meant for later questions carried in the handoff.

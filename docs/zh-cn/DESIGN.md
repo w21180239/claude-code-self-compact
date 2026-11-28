@@ -185,7 +185,7 @@ floor、node、work 都被 urgent 截顶，所以小窗口里各档向紧急档�
 
 每次成功压缩都以续接 prompt 收尾，无论是在阶段结束时请求，还是在对话中途请求，工作总会继续；唯一的例外是退出前的那次压缩。
 
-**退出时压缩。** `/exit` 表示这个会话之后还会 resume；直接关窗口则相反，进程收到 SIGHUP 结束（`session.end` 的 reason 为 `other`）。`session.end` 给所有 hook 合计 1.5 秒，不够做一次压缩，所以插件提前一步：`command.run` 挂在 `exit` 上（别名已解析，`/quit` 也算），来自 composer 或 bridge、会话空闲、无排队请求且门槛通过时，hook 代替命令作答（不退出），并通过定时器提交一条退出自检，要求调用 `compact_now`，不能 skip。压缩照常执行；本该发续接的地方，改由定时器调用 `$.command.run({ command: 'exit' })`（在回合等待的 hook 里这个调用会被拒绝），插件自己发出的 `/exit` 直接放行。自检被拒绝或被 deny、重试耗尽放弃（没有下一回合可等，重试用完即结束）、提交失败，也都会退出；在自检或压缩期间按 Esc、或输入新消息，则取消退出；再输一次 `/exit` 立即退出。Ctrl+C 和 Ctrl+D 不经过命令就结束会话，所以照常退出。`exitCompact=false` 关闭此功能。
+**退出时压缩。** `/exit` 表示这个会话之后还会 resume；直接关窗口则相反，进程收到 SIGHUP 结束（`session.end` 的 reason 为 `other`）。`session.end` 给所有 hook 合计 1.5 秒，不够做一次压缩，所以插件提前一步：`command.run` 挂在 `exit` 上（别名已解析，`/quit` 也算），来自 composer 或 bridge、会话空闲、无排队请求且门槛通过时，hook 代替命令作答（不退出），并通过定时器提交一条退出自检，要求调用 `compact_now`，写好给 resume 用的交接单。压缩照常执行；本该发续接的地方，改由定时器调用 `$.command.run({ command: 'exit' })`（在回合等待的 hook 里这个调用会被拒绝），插件自己发出的 `/exit` 直接放行。自检文案直接说明 skip 也会压缩：实测中模型把之前的「先别压缩」排在一条自称代表用户的插件消息之前，这样做是对的，所以插件不去争辩。自检被拒绝、调用被 deny 或提交失败时，插件在 1.5 秒防抖后自己调用 `$.session.compact`，用通用的 resume 指令（`exitInstructions` 加语言行），然后退出：`/exit` 是用户本人的操作，和敲 `/compact` 一样。重试耗尽放弃（没有下一回合可等，重试用完即结束）、兜底压缩失败，也都会退出；在自检或压缩期间按 Esc、或输入新消息，则取消退出；再输一次 `/exit` 立即退出。Ctrl+C 和 Ctrl+D 不经过命令就结束会话，所以照常退出。`exitCompact=false` 关闭此功能。
 
 ## 数据
 
