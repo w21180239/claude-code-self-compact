@@ -107,9 +107,9 @@ claude plugin install self-compact@claude-code-self-compact
 - **回合末自检。** 每个回合结束时，以下任一情况插件会提交一条简短 prompt：出现过节点标记、这一轮做了实活（主会话至少 2 次工具调用）且接近提醒起点、或上下文越过提醒起点仍未压缩。过线只是必要条件：当前块已收尾、接下来的工作不依赖上下文里的大段原文、剩余工作还够长，三条都满足 Claude 才调用 `compact_now`，否则回复 `skip: <一句理由>`，理由会记在日志 `self-check:declined` 行的 `reason` 里。回合以提问结束也会自检，因为收尾总结常常带问句；只有 `AskUserQuestion` 会抑制自检。每个触发点每涨 5 个百分点最多自检一次，没有新的工具活动不会连续自检。
 - **新工作块提示。** 门槛只要已开，每个人工 prompt 都会带一行：如果这条消息开启新工作块（换话题，或停了一阵重新接着做），而上一块已经收尾，先压缩再做。
 
-`autoNodes` 同时关闭这三项；`turnEndCheck` 只关闭回合末自检。压缩之后一律续接：每次成功压缩都会发送续接 prompt。
+`autoNodes` 同时关闭这三项；`turnEndCheck` 只关闭回合末自检。压缩之后一律续接：除退出前的那次以外，每次成功压缩都会发送续接 prompt。
 
-**离开时压缩（step-away）。** 你离开期间提示缓存会过期（订阅 1 小时，API key 5 分钟），回来后的第一条消息要按写入价重新缓存整个上下文。一个回合结束时若上下文已到节点档以上，插件从最后一次请求的发出时刻起算，设一个定时器：1 小时缓存提前 10 分钟、5 分钟缓存提前 90 秒。到点时你还没输入、也没有新回合，就用离开版文案提交自检（用户已离开、缓存约 N 分钟后过期；当前块已收尾就压缩，否则回复 `skip: <理由>`），由 Claude 用同样三条标准判断，所以做到一半的审查不会被压缩。每段空闲期最多触发一次（下一条人工输入重置），压缩排队或进行中、`AskUserQuestion` 之后、非交互会话、缓存时长未知时都不触发。日志记 `step-away`，随后是 `step-away:compacted` 或 `step-away:declined`。`stepAwayCompact` 可关闭；调试时环境变量 `SELF_COMPACT_STEPAWAY_MS` 会替换计算出的延迟。
+**`/exit` 时压缩。** 输入 `/exit`（或 `/quit`）表示你之后还会回到这个会话。上下文已过回本线时，插件先拦下退出，让 Claude 调用 `compact_now`（不能 skip；没做完的工作写进 `pending`，`next` 写回来时怎么接着做），压缩结束后再执行 `/exit`。之后 `claude --resume` 从压缩后的小摘要开始。直接关窗口或按 Ctrl+C/Ctrl+D 会立即退出，不受影响。等待期间再输一次 `/exit` 立即退出；按 Esc 或输入新消息则取消退出。Claude 拒绝或压缩失败时照样退出。日志依次记 `exit-check`、`exit:compacting` / `exit:declined` / `exit:aborted` / `exit:cancelled` / `exit:forced`、`exit`。`exitCompact` 可关闭。
 
 ## 交接单保留什么
 
@@ -159,7 +159,7 @@ P 的来源：每次压缩后的第一个主轮请求是压后大小的真实测
 | `releaseStopHooks` | false | true 时，排队中的压缩可以结束被其他 Stop hook（如 /goal）撑住的回合。仅在个人（非托管）环境有效；其他环境下内置 guard 会跳过用户 mod 的 Stop hook（见 FAQ） |
 | `autoNodes` | true | 自主触发：节点类工具调用（push、merge、PR、测试通过、消息已发、spec/plan 落盘、待办全完成）后附一行标记，回合末自检，门槛已开时每个人工 prompt 带新工作块提示。false 同时关闭这三项 |
 | `turnEndCheck` | true | 仅回合末自检（依赖 `autoNodes`）：出现节点、回合做了实活或长时间未压缩后，多开一个回合问 Claude 是否压缩 |
-| `stepAwayCompact` | true | 离开时压缩（依赖 `autoNodes`）：你让会话空闲时，在提示缓存过期前不久跑一次自检，让压缩发生在缓存还热的时候 |
+| `exitCompact` | true | `/exit` 时压缩：已过回本线时，Claude 先写交接单并压缩，再退出会话，之后 resume 从小上下文开始。关窗口或 Ctrl+C 照常退出 |
 | `enabled` | true | false 时工具仍注册，但所有调用被拒绝，也不提醒 |
 
 旧键 `minSavingK`、`nudgeStartPct`、`urgentPct` 仍可传入，但会被忽略；会话开始时插件写一行日志提示。请从设置中删除。
